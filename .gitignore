@@ -1,0 +1,24 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# S2E runtime outputs
+s2e-last
+s2e-out-*/
+serial.txt
+
+# Collected artifacts
+logs/
+normalized/
+extracted/
+run_try_*.log
+
+# Auto-generated helper outputs
+*.auto.env
+
+# Local sample links and environment-specific symlinks
+test.exe
+sid1_h294_2110453.dll
+guest-tools32
+guest-tools64
+guestfs

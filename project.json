@@ -1,0 +1,47 @@
+{
+    "creation_time": "2026-02-10 22:19:44.039850",
+    "custom_lua_string": "",
+    "dynamically_linked": false,
+    "enable_cfi": false,
+    "enable_pov_generation": false,
+    "enable_tickler": false,
+    "guestfs_paths": [
+        "/home/tako/hjyoo/s2e/images/windows-10pro1909-x86_64/guestfs"
+    ],
+    "has_guestfs": true,
+    "image": "/home/tako/hjyoo/s2e/images/windows-10pro1909-x86_64",
+    "modelled_functions": false,
+    "modules": [
+        [
+            "test.exe",
+            false
+        ]
+    ],
+    "processes": [
+        "test.exe"
+    ],
+    "project_dir": "/home/tako/hjyoo/s2e/projects/payload_replay_runtime",
+    "project_name": "payload_replay_runtime",
+    "project_type": "windows",
+    "recipes_dir": "/home/tako/hjyoo/s2e/projects/trace_harvest/recipes",
+    "seeds_dir": "/home/tako/hjyoo/s2e/projects/trace_harvest/seeds",
+    "single_path": false,
+    "sym_args": [],
+    "target": {
+        "arch": "x86_64",
+        "aux_files": [],
+        "files": [
+            "/home/tako/hjyoo/samples/test.exe"
+        ],
+        "name": "test.exe",
+        "os": "windows",
+        "path": "/home/tako/hjyoo/samples/test.exe"
+    },
+    "use_cupa": true,
+    "use_fault_injection": false,
+    "use_recipes": false,
+    "use_seeds": false,
+    "use_test_case_generator": true,
+    "warn_input_file": true,
+    "warn_seeds": true
+}
