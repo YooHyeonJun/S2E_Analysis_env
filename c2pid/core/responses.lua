@@ -1,10 +1,11 @@
 local M = {}
+local cfg = dofile("c2pid/core/config.lua").load_responses()
 
-local C2_MODE = os.getenv("S2E_C2_MODE") or "concrete"
-local MAX_RECV_BYTES = tonumber(os.getenv("S2E_C2_MAX_RECV") or "1024")
-local C2_LOG_BYTES = tonumber(os.getenv("S2E_C2_LOG_BYTES") or "64")
-local C2_SCENARIO_FILE = os.getenv("S2E_C2_SCENARIO_FILE") or "c2-scenarios.lua"
-local C2_DISABLE_INJECT = (os.getenv("S2E_C2_DISABLE_INJECT") or "0") == "1"
+local C2_MODE = cfg.C2_MODE
+local MAX_RECV_BYTES = cfg.C2_MAX_RECV
+local C2_LOG_BYTES = cfg.C2_LOG_BYTES
+local C2_SCENARIO_FILE = cfg.C2_SCENARIO_FILE
+local C2_DISABLE_INJECT = cfg.C2_DISABLE_INJECT
 local g_state_stage = {}
 local g_inject_notice_printed = false
 
@@ -23,6 +24,13 @@ end
 
 local function set_stage(state, n)
     g_state_stage[state_key(state)] = n
+end
+
+function M.cleanup_state(state)
+    local key = state_key(state)
+    if key ~= nil then
+        g_state_stage[key] = nil
+    end
 end
 
 local function load_scenario()
@@ -74,7 +82,7 @@ local function load_scenario()
             symbolic_ranges = {},
         })
     end
-    local name = os.getenv("S2E_C2_SCENARIO") or "default"
+    local name = cfg.C2_SCENARIO
     local sc = C2_SCENARIOS[name]
     if sc == nil then
         sc = C2_SCENARIOS.default

@@ -34,6 +34,7 @@ function M.attach(api, env)
     local pending_getproc = env.pending_getproc
     local pending_createmutex = env.pending_createmutex
     local pending_getlasterror = env.pending_getlasterror
+    local pending_memwrite = env.pending_memwrite
     local pending_threadcreate = env.pending_threadcreate
     local handle_to_path = env.handle_to_path
     local handle_to_dump = env.handle_to_dump
@@ -46,6 +47,32 @@ function M.attach(api, env)
     local C2_KILL_ON_TARGET_EXIT = env.C2_KILL_ON_TARGET_EXIT
     local C2_SUPPRESS_TARGET_EXIT = env.C2_SUPPRESS_TARGET_EXIT
     local C2_GETPROC_LOG_BURST = env.C2_GETPROC_LOG_BURST
+
+    local function append_memory_dump(state, sid, api_name, remote_handle, remote_base, src, req, retaddr)
+        if not C2_EXTRACT_PAYLOADS or src == nil or src == 0 then
+            return nil, nil
+        end
+        local body = common.try_read_bytes(state, src, req or 0)
+        if body == nil or #body == 0 then
+            return nil, nil
+        end
+        local out_dir = ensure_extract_dir()
+        local dump_name = string.format("sid%d_%s_hproc%x_dst%x.bin",
+            sid,
+            sanitize_name(api_name),
+            remote_handle or 0,
+            remote_base or 0)
+        local dump_path = out_dir .. "/" .. dump_name
+        local f = io.open(dump_path, "ab")
+        if f ~= nil then
+            f:write(body)
+            f:close()
+            emit_trace("interesting_api", state, retaddr,
+                string.format("api=payload_extract phase=mem_append kind=%s hproc=0x%x dst=0x%x bytes=%d out=%s",
+                    api_name, remote_handle or 0, remote_base or 0, #body, kv_escape(dump_path)))
+        end
+        return body, dump_path
+    end
 
     function api.hook_createfilea(state, instrumentation_state, is_call)
         local sid = common.state_id(state)
@@ -374,6 +401,73 @@ function M.attach(api, env)
             string.format("access=0x%x inherit=%d pid=%d", access, inherit, pid))
     end
 
+    function api.hook_virtualallocex(state, instrumentation_state, is_call)
+        local hproc = common.read_arg(state, 1) or 0
+        local addr = common.read_arg(state, 2) or 0
+        local size = common.read_arg(state, 3) or 0
+        local alloc_type = common.read_arg(state, 4) or 0
+        local protect = common.read_arg(state, 5) or 0
+        trace_api_passthrough(state, is_call, "VirtualAllocEx",
+            string.format("hproc=0x%x addr=0x%x size=%d type=0x%x protect=0x%x",
+                hproc, addr, size, alloc_type, protect))
+    end
+
+    function api.hook_writeprocessmemory(state, instrumentation_state, is_call)
+        local sid = common.state_id(state)
+        if is_call then
+            if not should_handle(state, is_call, "WriteProcessMemory") then
+                return
+            end
+            local hproc = common.read_arg(state, 1) or 0
+            local remote_base = common.read_arg(state, 2) or 0
+            local src = common.read_arg(state, 3) or 0
+            local req = common.read_arg(state, 4) or 0
+            local out_written = common.read_arg(state, 5) or 0
+            local retaddr = common.read_retaddr(state)
+            local head = read_head_hex(state, src, req)
+            append_memory_dump(state, sid, "WriteProcessMemory", hproc, remote_base, src, req, retaddr)
+            push_pending(pending_memwrite, sid, {
+                api = "WriteProcessMemory",
+                hproc = hproc,
+                remote_base = remote_base,
+                req = req,
+                out_written = out_written,
+                retaddr = retaddr,
+                head = head,
+            })
+            emit_trace("interesting_api", state, retaddr,
+                string.format("api=WriteProcessMemory phase=call hproc=0x%x dst=0x%x req=%d outptr=0x%x head=%s",
+                    hproc, remote_base, req, out_written, kv_escape(head)))
+            return
+        end
+
+        local info = pop_pending(pending_memwrite, sid)
+        if info == nil then
+            return
+        end
+        local ok = read_ret_ptr(state) or 0
+        local wrote = -1
+        if info.out_written ~= nil and info.out_written ~= 0 then
+            local n = read_u32_ptr(state, info.out_written)
+            if n ~= nil then
+                wrote = n
+            end
+        end
+        emit_trace("interesting_api", state, info.retaddr,
+            string.format("api=WriteProcessMemory phase=ret hproc=0x%x dst=0x%x ok=%d req=%d wrote=%d head=%s",
+                info.hproc or 0, info.remote_base or 0, ok, info.req or 0, wrote, kv_escape(info.head or "")))
+    end
+
+    function api.hook_ntmapviewofsection(state, instrumentation_state, is_call)
+        local section = common.read_arg(state, 1) or 0
+        local hproc = common.read_arg(state, 2) or 0
+        local base_ptr = common.read_arg(state, 3) or 0
+        local zero_bits = common.read_arg(state, 4) or 0
+        trace_api_passthrough(state, is_call, "NtMapViewOfSection",
+            string.format("section=0x%x hproc=0x%x baseptr=0x%x zerobits=%d",
+                section, hproc, base_ptr, zero_bits))
+    end
+
     function api.hook_queryfullprocessimagenamea(state, instrumentation_state, is_call)
         local hproc = common.read_arg(state, 1) or 0
         local flags = common.read_arg(state, 4) or 0
@@ -631,7 +725,7 @@ function M.attach(api, env)
         local ok = read_ret_ptr(state) or 0
         local wrote = -1
         if info.out_written ~= nil and info.out_written ~= 0 then
-            local w = state:mem():read(info.out_written, 4)
+            local w = read_u32_ptr(state, info.out_written)
             if w ~= nil then
                 wrote = w
             end

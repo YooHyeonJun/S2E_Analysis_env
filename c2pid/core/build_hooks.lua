@@ -2,48 +2,48 @@ local M = {}
 
 function M.build(common, pid_filter, responses)
     local target_profile = dofile("c2pid/core/target_profile.lua").load()
-    local C2_TRACE_COMPARE = (os.getenv("S2E_C2_TRACE_COMPARE") or "1") == "1"
-    local C2_LOG_BYTES = tonumber(os.getenv("S2E_C2_LOG_BYTES") or "64")
-    local C2_GUIDE_COMPARE = (os.getenv("S2E_C2_GUIDE_COMPARE") or "0") == "1"
-    local C2_COMPARE_BYPASS_PID = (os.getenv("S2E_C2_COMPARE_BYPASS_PID") or "0") == "1"
-    local C2_FORCE_FULL_SYMBOLIC_RECV = (os.getenv("S2E_C2_FORCE_FULL_SYMBOLIC_RECV") or "0") == "1"
-    local C2_COMPARE_MAX_PREFIX = tonumber(os.getenv("S2E_C2_COMPARE_MAX_PREFIX") or "32")
-    local C2_COMPARE_AFTER_NET_ONLY = (os.getenv("S2E_C2_COMPARE_AFTER_NET_ONLY") or "1") == "1"
-    local C2_COMPARE_AFTER_NET_BUDGET = tonumber(os.getenv("S2E_C2_COMPARE_AFTER_NET_BUDGET") or "8")
-    local C2_COMPARE_ONCE_PER_SITE = (os.getenv("S2E_C2_COMPARE_ONCE_PER_SITE") or "1") == "1"
-    local C2_NET_MAX_SYMBOLIC = tonumber(os.getenv("S2E_C2_NET_MAX_SYMBOLIC") or "1024")
-    local C2_RECV_FORMAT = os.getenv("S2E_C2_RECV_FORMAT") or ""
-    local C2_COMPARE_RETADDR_WHITELIST = os.getenv("S2E_C2_COMPARE_RETADDR_WHITELIST") or ""
-    local C2_COMPARE_CALLSITE_WHITELIST = os.getenv("S2E_C2_COMPARE_CALLSITE_WHITELIST") or ""
-    local C2_COMPARE_FALLBACK_MODULES = os.getenv("S2E_C2_COMPARE_FALLBACK_MODULES") or target_profile.target_module
-    local C2_FORCE_COMPARE_PASS = (os.getenv("S2E_C2_FORCE_COMPARE_PASS") or "1") == "1"
-    local C2_TRACE_EVENTS = (os.getenv("S2E_C2_TRACE_EVENTS") or "1") == "1"
-    local C2_GATE_MIN_READ = tonumber(os.getenv("S2E_C2_GATE_MIN_READ") or "0")
-    local C2_GATE_SIZE_OFF = tonumber(os.getenv("S2E_C2_GATE_SIZE_OFF") or "-1")
-    local C2_GATE_SIZE_OFFSETS = os.getenv("S2E_C2_GATE_SIZE_OFFSETS") or ""
-    local C2_GATE_SIZE_VALUE = os.getenv("S2E_C2_GATE_SIZE_VALUE") or "n"
-    local C2_GATE_MAGIC_OFF = tonumber(os.getenv("S2E_C2_GATE_MAGIC_OFF") or "-1")
-    local C2_GATE_MAGIC_HEX = os.getenv("S2E_C2_GATE_MAGIC_HEX") or ""
-    local C2_GATE_MAGIC_PATCHES = os.getenv("S2E_C2_GATE_MAGIC_PATCHES") or ""
-    local C2_KILL_ON_TARGET_EXIT = (os.getenv("S2E_C2_KILL_ON_TARGET_EXIT") or "1") == "1"
-    local C2_SUPPRESS_TARGET_EXIT = (os.getenv("S2E_C2_SUPPRESS_TARGET_EXIT") or "0") == "1"
-    local C2_FORCE_LASTERROR = tonumber(os.getenv("S2E_C2_FORCE_LASTERROR") or "")
-    local C2_EXTRACT_PAYLOADS = (os.getenv("S2E_C2_EXTRACT_PAYLOADS") or "1") == "1"
-    local C2_FORCE_SELECT_READY = (os.getenv("S2E_C2_FORCE_SELECT_READY") or "1") == "1"
-    local C2_FORCE_NET_EMULATION = (os.getenv("S2E_C2_FORCE_NET_EMULATION") or "0") == "1"
-    local C2_FORCE_NET_PROGRESS = (os.getenv("S2E_C2_FORCE_NET_PROGRESS") or "1") == "1"
-    local C2_FORCE_CONNECT_CALL = (os.getenv("S2E_C2_FORCE_CONNECT_CALL") or "1") == "1"
-    local C2_FORCE_KEYSTATE = (os.getenv("S2E_C2_FORCE_KEYSTATE") or "1") == "1"
-    local C2_KEYSTATE_PERIOD = tonumber(os.getenv("S2E_C2_KEYSTATE_PERIOD") or "37")
-    local C2_KEYSTATE_LOG_BURST = tonumber(os.getenv("S2E_C2_KEYSTATE_LOG_BURST") or "3")
-    local C2_KEYSTATE_LOG_EVERY = tonumber(os.getenv("S2E_C2_KEYSTATE_LOG_EVERY") or "200")
-    local C2_GETPROC_LOG_BURST = tonumber(os.getenv("S2E_C2_GETPROC_LOG_BURST") or "3")
-    local C2_GETPROC_LOG_EVERY = tonumber(os.getenv("S2E_C2_GETPROC_LOG_EVERY") or "100")
-    local C2_FORCE_RECV_N = tonumber(os.getenv("S2E_C2_FORCE_RECV_N") or "64")
-    local C2_FORCE_RECV_USE_REQ = (os.getenv("S2E_C2_FORCE_RECV_USE_REQ") or "1") == "1"
-    local C2_EXTRACT_BASE_DIR = os.getenv("S2E_C2_EXTRACT_DIR")
-        or ((os.getenv("S2E_PROJECT_DIR") or ".") .. "/extracted")
-    local C2_EXTRACT_RUN_ID = os.getenv("S2E_C2_EXTRACT_RUN_ID") or "manual"
+    local config = dofile("c2pid/core/config.lua").load(target_profile)
+    local C2_TRACE_COMPARE = config.C2_TRACE_COMPARE
+    local C2_LOG_BYTES = config.C2_LOG_BYTES
+    local C2_GUIDE_COMPARE = config.C2_GUIDE_COMPARE
+    local C2_COMPARE_BYPASS_PID = config.C2_COMPARE_BYPASS_PID
+    local C2_FORCE_FULL_SYMBOLIC_RECV = config.C2_FORCE_FULL_SYMBOLIC_RECV
+    local C2_COMPARE_MAX_PREFIX = config.C2_COMPARE_MAX_PREFIX
+    local C2_COMPARE_AFTER_NET_ONLY = config.C2_COMPARE_AFTER_NET_ONLY
+    local C2_COMPARE_AFTER_NET_BUDGET = config.C2_COMPARE_AFTER_NET_BUDGET
+    local C2_COMPARE_ONCE_PER_SITE = config.C2_COMPARE_ONCE_PER_SITE
+    local C2_NET_MAX_SYMBOLIC = config.C2_NET_MAX_SYMBOLIC
+    local C2_RECV_FORMAT = config.C2_RECV_FORMAT
+    local C2_COMPARE_RETADDR_WHITELIST = config.C2_COMPARE_RETADDR_WHITELIST
+    local C2_COMPARE_CALLSITE_WHITELIST = config.C2_COMPARE_CALLSITE_WHITELIST
+    local C2_COMPARE_FALLBACK_MODULES = config.C2_COMPARE_FALLBACK_MODULES
+    local C2_FORCE_COMPARE_PASS = config.C2_FORCE_COMPARE_PASS
+    local C2_TRACE_EVENTS = config.C2_TRACE_EVENTS
+    local C2_GATE_MIN_READ = config.C2_GATE_MIN_READ
+    local C2_GATE_SIZE_OFF = config.C2_GATE_SIZE_OFF
+    local C2_GATE_SIZE_OFFSETS = config.C2_GATE_SIZE_OFFSETS
+    local C2_GATE_SIZE_VALUE = config.C2_GATE_SIZE_VALUE
+    local C2_GATE_MAGIC_OFF = config.C2_GATE_MAGIC_OFF
+    local C2_GATE_MAGIC_HEX = config.C2_GATE_MAGIC_HEX
+    local C2_GATE_MAGIC_PATCHES = config.C2_GATE_MAGIC_PATCHES
+    local C2_KILL_ON_TARGET_EXIT = config.C2_KILL_ON_TARGET_EXIT
+    local C2_SUPPRESS_TARGET_EXIT = config.C2_SUPPRESS_TARGET_EXIT
+    local C2_FORCE_LASTERROR = config.C2_FORCE_LASTERROR
+    local C2_EXTRACT_PAYLOADS = config.C2_EXTRACT_PAYLOADS
+    local C2_FORCE_SELECT_READY = config.C2_FORCE_SELECT_READY
+    local C2_FORCE_NET_EMULATION = config.C2_FORCE_NET_EMULATION
+    local C2_FORCE_NET_PROGRESS = config.C2_FORCE_NET_PROGRESS
+    local C2_FORCE_CONNECT_CALL = config.C2_FORCE_CONNECT_CALL
+    local C2_FORCE_KEYSTATE = config.C2_FORCE_KEYSTATE
+    local C2_KEYSTATE_PERIOD = config.C2_KEYSTATE_PERIOD
+    local C2_KEYSTATE_LOG_BURST = config.C2_KEYSTATE_LOG_BURST
+    local C2_KEYSTATE_LOG_EVERY = config.C2_KEYSTATE_LOG_EVERY
+    local C2_GETPROC_LOG_BURST = config.C2_GETPROC_LOG_BURST
+    local C2_GETPROC_LOG_EVERY = config.C2_GETPROC_LOG_EVERY
+    local C2_FORCE_RECV_N = config.C2_FORCE_RECV_N
+    local C2_FORCE_RECV_USE_REQ = config.C2_FORCE_RECV_USE_REQ
+    local C2_EXTRACT_BASE_DIR = config.C2_EXTRACT_BASE_DIR
+    local C2_EXTRACT_RUN_ID = config.C2_EXTRACT_RUN_ID
 
     local retaddr_whitelist = {}
     local callsite_whitelist = {}
@@ -57,6 +57,7 @@ function M.build(common, pid_filter, responses)
     local pending_getproc = {}
     local pending_createmutex = {}
     local pending_getlasterror = {}
+    local pending_memwrite = {}
     local pending_connect = {}
     local pending_wsaconnect = {}
     local pending_select = {}
@@ -260,7 +261,11 @@ function M.build(common, pid_filter, responses)
         if addr == nil or addr == 0 then
             return nil
         end
-        return state:mem():read(addr, 1)
+        local raw = state:mem():readBytes(addr, 1)
+        if raw == nil or #raw < 1 then
+            return nil
+        end
+        return string.byte(raw, 1)
     end
 
     local function as_signed_ret(state, v)
@@ -662,7 +667,12 @@ function M.build(common, pid_filter, responses)
         if ptr == nil or ptr == 0 then
             return nil
         end
-        return state:mem():read(ptr, 4)
+        local raw = state:mem():readBytes(ptr, 4)
+        if raw == nil or #raw < 4 then
+            return nil
+        end
+        local b1, b2, b3, b4 = raw:byte(1, 4)
+        return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
     end
 
     local function read_wstr_len_ptr(state, p_str, p_len, max_chars)
@@ -729,11 +739,44 @@ function M.build(common, pid_filter, responses)
         return false, n
     end
 
+    local function cleanup_state_data(state)
+        local sid = common.state_id(state)
+        state_ctx[sid] = nil
+        pending_writefile[sid] = nil
+        pending_createfile[sid] = nil
+        pending_readfile[sid] = nil
+        pending_loadlibrary[sid] = nil
+        pending_getproc[sid] = nil
+        pending_createmutex[sid] = nil
+        pending_getlasterror[sid] = nil
+        pending_memwrite[sid] = nil
+        pending_connect[sid] = nil
+        pending_wsaconnect[sid] = nil
+        pending_select[sid] = nil
+        pending_getsockopt[sid] = nil
+        pending_getsockname[sid] = nil
+        pending_wsaioctl[sid] = nil
+        pending_wsapoll[sid] = nil
+        pending_wsawait[sid] = nil
+        pending_recv[sid] = nil
+        pending_threadcreate[sid] = nil
+        handle_to_path[sid] = nil
+        handle_to_dump[sid] = nil
+        last_create_path[sid] = nil
+        if responses.cleanup_state ~= nil then
+            responses.cleanup_state(state)
+        end
+        if pid_filter.forget_state ~= nil then
+            pid_filter.forget_state(state)
+        end
+    end
+
     local function should_handle(state, is_call, tag)
         if not is_call then
             return false
         end
         if pid_filter.should_kill_non_target(state, tag) then
+            cleanup_state_data(state)
             state:kill(0, string.format("c2pid: non-target state at %s", tostring(tag)))
             return false
         end
@@ -803,6 +846,7 @@ function M.build(common, pid_filter, responses)
     end
 
     local function kill_target_state_now(state, instrumentation_state, reason)
+        cleanup_state_data(state)
         state:kill(0, reason)
     end
 
@@ -848,6 +892,7 @@ function M.build(common, pid_filter, responses)
         sanitize_name = sanitize_name,
         basename_path = basename_path,
         should_extract_path = should_extract_path,
+        cleanup_state_data = cleanup_state_data,
         callsite_allowed = callsite_allowed,
         clamp_prefix = clamp_prefix,
         constrain_bytes_by_write = constrain_bytes_by_write,
@@ -859,6 +904,7 @@ function M.build(common, pid_filter, responses)
         pending_getproc = pending_getproc,
         pending_createmutex = pending_createmutex,
         pending_getlasterror = pending_getlasterror,
+        pending_memwrite = pending_memwrite,
         pending_connect = pending_connect,
         pending_wsaconnect = pending_wsaconnect,
         pending_select = pending_select,

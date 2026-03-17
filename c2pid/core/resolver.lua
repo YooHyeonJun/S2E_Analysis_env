@@ -1,108 +1,7 @@
 local M = {}
 local target_profile = dofile("c2pid/core/target_profile.lua").load()
-
-local API_TO_HANDLER = {
-    WSAStartup = "hook_wsastartup",
-    socket = "hook_socket",
-    closesocket = "hook_closesocket",
-    recv = "hook_recv",
-    WSARecv = "hook_wsarecv",
-    InternetReadFile = "hook_internetreadfile",
-    WinHttpReadData = "hook_winhttpreaddata",
-    InternetOpenA = "hook_internetopena",
-    InternetConnectA = "hook_internetconnecta",
-    InternetOpenUrlA = "hook_internetopenurla",
-    URLDownloadToFileA = "hook_urldownloadtofilea",
-    InternetWriteFile = "hook_internetwritefile",
-    InternetQueryDataAvailable = "hook_internetquerydataavailable",
-    HttpQueryInfoA = "hook_httpqueryinfoa",
-    FtpOpenFileA = "hook_ftpopenfilea",
-    FtpSetCurrentDirectoryA = "hook_ftpsetcurrentdirectorya",
-    connect = "hook_connect",
-    WSAConnect = "hook_wsaconnect",
-    WSAAsyncSelect = "hook_wsaasyncselect",
-    WSAEventSelect = "hook_wsaeventselect",
-    WSAEnumNetworkEvents = "hook_wsaenumnetworkevents",
-    WSAGetLastError = "hook_wsagetlasterror",
-    ioctlsocket = "hook_ioctlsocket",
-    accept = "hook_accept",
-    select = "hook_select",
-    WSAPoll = "hook_wsapoll",
-    WSAWaitForMultipleEvents = "hook_wsawaitformultipleevents",
-    send = "hook_send",
-    WSASend = "hook_wsasend",
-    sendto = "hook_sendto",
-    recvfrom = "hook_recvfrom",
-    gethostbyname = "hook_gethostbyname",
-    gethostbyaddr = "hook_gethostbyaddr",
-    getsockopt = "hook_getsockopt",
-    getsockname = "hook_getsockname",
-    WSAIoctl = "hook_wsaioctl",
-    gethostname = "hook_gethostname",
-    getservbyname = "hook_getservbyname",
-    inet_addr = "hook_inet_addr",
-    inet_ntoa = "hook_inet_ntoa",
-    htonl = "hook_htonl",
-    htons = "hook_htons",
-    WNetOpenEnumA = "hook_wnetopenenuma",
-    WNetEnumResourceA = "hook_wnetenumresourcea",
-    WNetCloseEnum = "hook_wnetcloseenum",
-    IcmpCreateFile = "hook_icmpcreatefile",
-    IcmpSendEcho = "hook_icmpsendecho",
-    CreateFileA = "hook_createfilea",
-    CreateFileW = "hook_createfilew",
-    ReadFile = "hook_readfile",
-    GetFileAttributesA = "hook_getfileattributesa",
-    GetFileAttributesW = "hook_getfileattributesw",
-    WriteFile = "hook_writefile",
-    CloseHandle = "hook_closehandle",
-    LoadLibraryA = "hook_loadlibrarya",
-    LoadLibraryW = "hook_loadlibraryw",
-    LoadLibraryExA = "hook_loadlibraryexa",
-    LoadLibraryExW = "hook_loadlibraryexw",
-    GetProcAddress = "hook_getprocaddress",
-    CreateMutexA = "hook_createmutexa",
-    CreateMutexW = "hook_createmutexw",
-    CreateThread = "hook_createthread",
-    CreateRemoteThread = "hook_createremotethread",
-    OpenProcess = "hook_openprocess",
-    QueryFullProcessImageNameA = "hook_queryfullprocessimagenamea",
-    QueryFullProcessImageNameW = "hook_queryfullprocessimagenamew",
-    CreateToolhelp32Snapshot = "hook_createtoolhelp32snapshot",
-    Process32FirstA = "hook_process32firsta",
-    Process32FirstW = "hook_process32firstw",
-    Process32NextA = "hook_process32nexta",
-    Process32NextW = "hook_process32nextw",
-    GetVersion = "hook_getversion",
-    GetVersionExA = "hook_getversionexa",
-    GetVersionExW = "hook_getversionexw",
-    GetLastError = "hook_getlasterror",
-    GetKeyState = "hook_getkeystate",
-    GetAsyncKeyState = "hook_getasynckeystate",
-    GetKeyboardState = "hook_getkeyboardstate",
-    ShellExecuteA = "hook_shellexecutea",
-    ShellExecuteW = "hook_shellexecutew",
-    strcmp = "hook_strcmp",
-    stricmp = "hook_stricmp",
-    _stricmp = "hook_stricmp",
-    _strcmpi = "hook_stricmp",
-    strncmp = "hook_strncmp",
-    memcmp = "hook_memcmp",
-    _beginthreadex = "hook_beginthreadex",
-    lstrcmpA = "hook_strcmp",
-    lstrcmpiA = "hook_strcmp",
-    ExitProcess = "hook_exitprocess",
-    TerminateProcess = "hook_terminateprocess",
-    exit = "hook_exit",
-    _exit = "hook_exit",
-    abort = "hook_abort",
-    NtQueryInformationProcess = "hook_ntqueryinformationprocess",
-    Install = "hook_export_install",
-    MainInstall = "hook_export_maininstall",
-    ServiceMain = "hook_export_servicemain",
-    DllUpdate = "hook_export_dllupdate",
-    Uninstall = "hook_export_uninstall",
-}
+local api_registry = dofile("c2pid/core/api_registry.lua")
+local cfg = dofile("c2pid/core/config.lua").load_resolver()
 
 local function split_csv(s)
     local out = {}
@@ -118,51 +17,13 @@ local function split_csv(s)
     return out
 end
 
-local DLL_APIS = {
-    ["ws2_32.dll"] = {
-        "WSAStartup", "socket", "closesocket",
-        "WSAAsyncSelect", "WSAEventSelect", "WSAEnumNetworkEvents", "WSAGetLastError",
-        "ioctlsocket", "accept", "connect", "WSAConnect", "select",
-        "WSAPoll", "WSAWaitForMultipleEvents",
-        "send", "WSASend", "sendto", "recv", "WSARecv", "recvfrom",
-        "gethostbyname", "gethostbyaddr", "getsockopt", "getsockname", "WSAIoctl",
-        "gethostname", "getservbyname",
-        "inet_addr", "inet_ntoa", "htonl", "htons"
-    },
-    ["wininet.dll"] = {
-        "InternetOpenA", "InternetConnectA", "InternetOpenUrlA",
-        "InternetReadFile", "InternetWriteFile", "InternetQueryDataAvailable",
-        "HttpQueryInfoA", "FtpOpenFileA", "FtpSetCurrentDirectoryA"
-    },
-    ["urlmon.dll"] = { "URLDownloadToFileA" },
-    ["winhttp.dll"] = { "WinHttpReadData" },
-    ["mpr.dll"] = { "WNetOpenEnumA", "WNetEnumResourceA", "WNetCloseEnum" },
-    ["iphlpapi.dll"] = { "IcmpCreateFile", "IcmpSendEcho" },
-    ["shell32.dll"] = { "ShellExecuteA", "ShellExecuteW" },
-    ["user32.dll"] = { "GetKeyState", "GetAsyncKeyState", "GetKeyboardState" },
-    ["msvcrt.dll"] = { "strcmp", "stricmp", "_stricmp", "_strcmpi", "strncmp", "memcmp", "exit", "_exit", "abort", "_beginthreadex" },
-    ["ucrtbase.dll"] = { "strcmp", "stricmp", "_stricmp", "_strcmpi", "strncmp", "memcmp", "exit", "_exit", "abort", "_beginthreadex" },
-    ["kernel32.dll"] = {
-        "lstrcmpA", "lstrcmpiA", "ExitProcess", "TerminateProcess",
-        "CreateFileA", "CreateFileW", "GetFileAttributesA", "GetFileAttributesW",
-        "ReadFile", "WriteFile", "CloseHandle", "LoadLibraryA", "LoadLibraryW", "LoadLibraryExA", "LoadLibraryExW",
-        "GetProcAddress", "CreateMutexA", "CreateMutexW", "CreateThread", "CreateRemoteThread",
-        "OpenProcess", "QueryFullProcessImageNameA", "QueryFullProcessImageNameW",
-        "CreateToolhelp32Snapshot", "Process32FirstA", "Process32FirstW", "Process32NextA", "Process32NextW",
-        "GetVersion", "GetVersionExA", "GetVersionExW", "GetLastError"
-    },
-    ["ntdll.dll"] = { "NtQueryInformationProcess" },
-}
-
-if target_profile.kind == "dll" then
-    DLL_APIS[target_profile.target_dll_name_l] = target_profile.target_exports
-end
+local DLL_APIS = api_registry.build_module_api_map(target_profile)
 
 local EXTRA_HOOKS = target_profile.extra_hooks
 if EXTRA_HOOKS == nil or EXTRA_HOOKS:match("^%s*$") then
     EXTRA_HOOKS = ""
 end
-local DLL_ARCH = string.lower(os.getenv("S2E_C2_DLL_ARCH") or "auto")
+local DLL_ARCH = cfg.DLL_ARCH
 
 local function file_exists(path)
     local f = io.open(path, "rb")
@@ -397,8 +258,8 @@ local function register_one(common, module_name, api_name, handler_name, rva, im
 
     local module_key = module_name:gsub("[^%w_]", "_")
     local base_key = string.format("c2pid_%s_%s_%x", module_key, api_name, rva)
-    common.add_hook_entry(base_key .. "_rva", module_name, handler_name, rva)
-    common.add_hook_entry(base_key .. "_base", module_name, handler_name, image_base + rva)
+    common.add_hook_entry(base_key .. "_rva", module_name, handler_name, rva, api_name)
+    common.add_hook_entry(base_key .. "_base", module_name, handler_name, image_base + rva, api_name)
     seen[pc_rva] = true
     seen[pc_base] = true
     return 2
@@ -450,7 +311,7 @@ function M.register_export_hooks(common, handlers)
                 local loaded = 0
                 local _, api
                 for _, api in ipairs(apis) do
-                    local handler = API_TO_HANDLER[api]
+                    local handler = api_registry.get_handler_name(api)
                     local fn = handler and handlers[handler] or nil
                     if fn == nil and target_profile.kind == "dll"
                             and string.lower(dll_name) == target_profile.target_dll_name_l then

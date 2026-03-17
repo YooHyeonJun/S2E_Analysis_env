@@ -38,30 +38,36 @@ function M.attach(api, env)
     local C2_FORCE_RECV_N = env.C2_FORCE_RECV_N
     local C2_FORCE_RECV_USE_REQ = env.C2_FORCE_RECV_USE_REQ
 
-    function api.hook_connect(state, instrumentation_state, is_call)
+    local function force_connect_call(api_name, state, instrumentation_state, retaddr)
+        common.write_ret(state, 0)
+        emit_trace("interesting_api", state, retaddr,
+            string.format("api=%s phase=forced_call forced=0", api_name))
+        instrumentation_state:skipFunction(true)
+    end
+
+    local function handle_connect_call(api_name, pending_tbl, state, instrumentation_state)
         local sid = common.state_id(state)
-        if is_call then
-            if not should_handle(state, is_call, "connect") then
-                return
-            end
-            local retaddr = common.read_retaddr(state)
-            push_pending(pending_connect, sid, { retaddr = retaddr })
-            emit_trace("interesting_api", state, retaddr, "api=connect phase=call")
-            if C2_FORCE_CONNECT_CALL then
-                common.write_ret(state, 0)
-                emit_trace("interesting_api", state, retaddr, "api=connect phase=forced_call forced=0")
-                instrumentation_state:skipFunction(true)
-                return
-            end
-            if not C2_FORCE_NET_EMULATION then
-                return
-            end
-            print(string.format("[c2pid] enter connect pid=0x%x", pid_filter.get_tracked_pid() or 0))
-            common.write_ret(state, 0)
-            instrumentation_state:skipFunction(true)
-            return
+        if not should_handle(state, true, api_name) then
+            return true
         end
-        local info = pop_pending(pending_connect, sid)
+        local retaddr = common.read_retaddr(state)
+        push_pending(pending_tbl, sid, { retaddr = retaddr })
+        emit_trace("interesting_api", state, retaddr, string.format("api=%s phase=call", api_name))
+        if C2_FORCE_CONNECT_CALL then
+            force_connect_call(api_name, state, instrumentation_state, retaddr)
+            return true
+        end
+        if not C2_FORCE_NET_EMULATION then
+            return true
+        end
+        print(string.format("[c2pid] enter %s pid=0x%x", api_name, pid_filter.get_tracked_pid() or 0))
+        common.write_ret(state, 0)
+        instrumentation_state:skipFunction(true)
+        return true
+    end
+
+    local function handle_connect_ret(api_name, pending_tbl, state)
+        local info = pop_pending(pending_tbl, common.state_id(state))
         if info == nil then
             return
         end
@@ -70,50 +76,94 @@ function M.attach(api, env)
         if C2_FORCE_NET_PROGRESS and not C2_FORCE_NET_EMULATION and orig ~= 0 then
             common.write_ret(state, 0)
             emit_trace("interesting_api", state, info.retaddr,
-                string.format("api=connect phase=ret orig=%d forced=0", orig))
+                string.format("api=%s phase=ret orig=%d forced=0", api_name, orig))
             return
         end
         emit_trace("interesting_api", state, info.retaddr,
-            string.format("api=connect phase=ret ret=%d", orig))
+            string.format("api=%s phase=ret ret=%d", api_name, orig))
+    end
+
+    local function read_recv_payload(state, dst, req_n, template_tag, symbolic_tag)
+        local n = responses.inject(common, state, dst, req_n)
+        if n == nil or n <= 0 then
+            n, _ = apply_recv_template(state, dst, req_n, template_tag)
+            if n == nil or n <= 0 then
+                n = symbolicize_net_buffer(state, dst, req_n, symbolic_tag)
+            end
+        elseif C2_FORCE_FULL_SYMBOLIC_RECV then
+            state:mem():makeSymbolic(dst, n, env.next_sym_tag(symbolic_tag))
+        end
+        return n
+    end
+
+    local function emulate_read_buffer(args)
+        local n = 0
+        if common.ensure_ptr_readable(args.state, args.dst, args.buffer_name) then
+            n = read_recv_payload(args.state, args.dst, args.req_n, args.template_tag, args.symbolic_tag)
+            n = apply_net_gate(args.state, args.dst, args.req_n, n, args.gate_tag)
+        end
+        if args.out_n ~= nil and args.out_n ~= 0 then
+            args.state:mem():write(args.out_n, n, 4)
+        end
+        arm_compare_window(args.state)
+        log_recv_observe(args.api_name, args.state, args.retaddr, args.dst, args.req_n, n)
+        common.write_ret(args.state, args.ret_value)
+        args.instrumentation_state:skipFunction(true)
+    end
+
+    local function force_recv_like_call(args)
+        if not common.ensure_ptr_readable(args.state, args.dst, args.buffer_name) then
+            emit_trace("interesting_api", args.state, args.retaddr,
+                string.format("api=%s phase=unreadable sock=0x%x dst=0x%x req=%d flags=0x%x",
+                    args.api_name, args.sock or 0, args.dst or 0, args.req_n or 0, args.flags or 0))
+            return false
+        end
+
+        local n = read_recv_payload(args.state, args.dst, args.req_n, args.template_tag, args.symbolic_tag)
+        n = apply_net_gate(args.state, args.dst, args.req_n, n, args.gate_tag)
+        arm_compare_window(args.state)
+        log_recv_observe(args.api_name, args.state, args.retaddr, args.dst, args.req_n, n)
+        common.write_ret(args.state, n)
+        emit_trace("interesting_api", args.state, args.retaddr,
+            string.format("api=%s phase=forced sock=0x%x dst=0x%x req=%d flags=0x%x forced=%d head=%s",
+                args.api_name, args.sock or 0, args.dst or 0, args.req_n or 0, args.flags or 0, n or 0,
+                kv_escape(read_head_hex(args.state, args.dst, n or 0))))
+        args.instrumentation_state:skipFunction(true)
+        return true
+    end
+
+    local function force_recv_progress(state, dst, req_n, tag_prefix, gate_tag)
+        local req = common.clamp(req_n or 0, 0, C2_NET_MAX_SYMBOLIC) or 0
+        local n = 1
+        if C2_FORCE_RECV_USE_REQ and req > 0 then
+            n = req
+        else
+            n = common.clamp(C2_FORCE_RECV_N or 64, 1, C2_NET_MAX_SYMBOLIC) or 1
+            if req > 0 and n > req then
+                n = req
+            end
+        end
+        if n <= 0 then
+            n = 1
+        end
+        state:mem():makeSymbolic(dst, n, env.next_sym_tag(tag_prefix))
+        return apply_net_gate(state, dst, req_n, n, gate_tag)
+    end
+
+    function api.hook_connect(state, instrumentation_state, is_call)
+        if is_call then
+            handle_connect_call("connect", pending_connect, state, instrumentation_state)
+            return
+        end
+        handle_connect_ret("connect", pending_connect, state)
     end
 
     function api.hook_wsaconnect(state, instrumentation_state, is_call)
-        local sid = common.state_id(state)
         if is_call then
-            if not should_handle(state, is_call, "WSAConnect") then
-                return
-            end
-            local retaddr = common.read_retaddr(state)
-            push_pending(pending_wsaconnect, sid, { retaddr = retaddr })
-            emit_trace("interesting_api", state, retaddr, "api=WSAConnect phase=call")
-            if C2_FORCE_CONNECT_CALL then
-                common.write_ret(state, 0)
-                emit_trace("interesting_api", state, retaddr, "api=WSAConnect phase=forced_call forced=0")
-                instrumentation_state:skipFunction(true)
-                return
-            end
-            if not C2_FORCE_NET_EMULATION then
-                return
-            end
-            print(string.format("[c2pid] enter WSAConnect pid=0x%x", pid_filter.get_tracked_pid() or 0))
-            common.write_ret(state, 0)
-            instrumentation_state:skipFunction(true)
+            handle_connect_call("WSAConnect", pending_wsaconnect, state, instrumentation_state)
             return
         end
-        local info = pop_pending(pending_wsaconnect, sid)
-        if info == nil then
-            return
-        end
-        local raw = read_ret_ptr(state) or 0
-        local orig = as_signed_ret(state, raw)
-        if C2_FORCE_NET_PROGRESS and not C2_FORCE_NET_EMULATION and orig ~= 0 then
-            common.write_ret(state, 0)
-            emit_trace("interesting_api", state, info.retaddr,
-                string.format("api=WSAConnect phase=ret orig=%d forced=0", orig))
-            return
-        end
-        emit_trace("interesting_api", state, info.retaddr,
-            string.format("api=WSAConnect phase=ret ret=%d", orig))
+        handle_connect_ret("WSAConnect", pending_wsaconnect, state)
     end
 
     function api.hook_send(state, instrumentation_state, is_call)
@@ -150,7 +200,7 @@ function M.attach(api, env)
             local elem_size = common.is_x64(state) and 16 or 8
             for i = 0, cnt - 1 do
                 local base = bufs + i * elem_size
-                local len = state:mem():read(base, 4)
+                local len = read_u32_ptr(state, base)
                 if len ~= nil and len > 0 then
                     total = total + len
                 end
@@ -572,31 +622,20 @@ function M.attach(api, env)
                 return
             end
             print(string.format("[c2pid] enter recv sock=0x%x req_n=%s flags=0x%x", sock, tostring(req_n), flags))
-
-            if not common.ensure_ptr_readable(state, dst, "recv buffer") then
-                emit_trace("interesting_api", state, retaddr,
-                    string.format("api=recv phase=unreadable sock=0x%x dst=0x%x req=%d flags=0x%x",
-                        sock, dst or 0, req_n or 0, flags))
-                return
-            end
-
-            local n = responses.inject(common, state, dst, req_n)
-            if n == nil or n <= 0 then
-                n, _ = apply_recv_template(state, dst, req_n, "c2pid_recvfmt")
-                if n == nil or n <= 0 then
-                    n = symbolicize_net_buffer(state, dst, req_n, "c2pid_recv")
-                end
-            elseif C2_FORCE_FULL_SYMBOLIC_RECV then
-                state:mem():makeSymbolic(dst, n, env.next_sym_tag("c2pid_recv"))
-            end
-            n = apply_net_gate(state, dst, req_n, n, "recv")
-            arm_compare_window(state)
-            log_recv_observe("recv", state, retaddr, dst, req_n, n)
-            common.write_ret(state, n)
-            emit_trace("interesting_api", state, retaddr,
-                string.format("api=recv phase=forced sock=0x%x dst=0x%x req=%d flags=0x%x forced=%d head=%s",
-                    sock, dst or 0, req_n or 0, flags, n or 0, kv_escape(read_head_hex(state, dst, n or 0))))
-            instrumentation_state:skipFunction(true)
+            force_recv_like_call({
+                api_name = "recv",
+                state = state,
+                instrumentation_state = instrumentation_state,
+                retaddr = retaddr,
+                sock = sock,
+                dst = dst,
+                req_n = req_n,
+                flags = flags,
+                buffer_name = "recv buffer",
+                template_tag = "c2pid_recvfmt",
+                symbolic_tag = "c2pid_recv",
+                gate_tag = "recv",
+            })
             return
         end
 
@@ -616,21 +655,7 @@ function M.attach(api, env)
         end
 
         if C2_FORCE_NET_PROGRESS and not C2_FORCE_NET_EMULATION and info.dst ~= nil and info.dst ~= 0 then
-            local req = common.clamp(info.req_n or 0, 0, C2_NET_MAX_SYMBOLIC) or 0
-            local n = 1
-            if C2_FORCE_RECV_USE_REQ and req > 0 then
-                n = req
-            else
-                n = common.clamp(C2_FORCE_RECV_N or 64, 1, C2_NET_MAX_SYMBOLIC) or 1
-                if req > 0 and n > req then
-                    n = req
-                end
-            end
-            if n <= 0 then
-                n = 1
-            end
-            state:mem():makeSymbolic(info.dst, n, env.next_sym_tag("c2pid_recv_retforce"))
-            n = apply_net_gate(state, info.dst, info.req_n, n, "recv_retforce")
+            local n = force_recv_progress(state, info.dst, info.req_n, "c2pid_recv_retforce", "recv_retforce")
             common.write_ret(state, n)
             arm_compare_window(state)
             log_recv_observe("recv", state, info.retaddr, info.dst, info.req_n, n)
@@ -669,29 +694,23 @@ function M.attach(api, env)
 
         local ptr_off = common.is_x64(state) and 8 or 4
         local first = bufs
-        local req_n = state:mem():read(first, 4)
+        local req_n = read_u32_ptr(state, first)
         local dst = state:mem():readPointer(first + ptr_off)
         print(string.format("[c2pid] enter WSARecv req_n=%s", tostring(req_n)))
-        local n = 0
-        if common.ensure_ptr_readable(state, dst, "WSARecv buffer") then
-            n = responses.inject(common, state, dst, req_n)
-            if n == nil or n <= 0 then
-                n, _ = apply_recv_template(state, dst, req_n, "c2pid_wsarecvfmt")
-                if n == nil or n <= 0 then
-                    n = symbolicize_net_buffer(state, dst, req_n, "c2pid_wsarecv")
-                end
-            elseif C2_FORCE_FULL_SYMBOLIC_RECV then
-                state:mem():makeSymbolic(dst, n, env.next_sym_tag("c2pid_wsarecv"))
-            end
-            n = apply_net_gate(state, dst, req_n, n, "wsarecv")
-        end
-        if recvd_ptr ~= nil and recvd_ptr ~= 0 then
-            state:mem():write(recvd_ptr, n, 4)
-        end
-        arm_compare_window(state)
-        log_recv_observe("WSARecv", state, retaddr, dst, req_n, n)
-        common.write_ret(state, 0)
-        instrumentation_state:skipFunction(true)
+        emulate_read_buffer({
+            api_name = "WSARecv",
+            state = state,
+            instrumentation_state = instrumentation_state,
+            retaddr = retaddr,
+            dst = dst,
+            req_n = req_n,
+            out_n = recvd_ptr,
+            buffer_name = "WSARecv buffer",
+            template_tag = "c2pid_wsarecvfmt",
+            symbolic_tag = "c2pid_wsarecv",
+            gate_tag = "wsarecv",
+            ret_value = 0,
+        })
     end
 
     function api.hook_internetreadfile(state, instrumentation_state, is_call)
@@ -708,26 +727,20 @@ function M.attach(api, env)
             return
         end
         print(string.format("[c2pid] enter InternetReadFile req_n=%s", tostring(req_n)))
-        local n = 0
-        if common.ensure_ptr_readable(state, dst, "InternetReadFile buffer") then
-            n = responses.inject(common, state, dst, req_n)
-            if n == nil or n <= 0 then
-                n, _ = apply_recv_template(state, dst, req_n, "c2pid_internetreadfilefmt")
-                if n == nil or n <= 0 then
-                    n = symbolicize_net_buffer(state, dst, req_n, "c2pid_internetreadfile")
-                end
-            elseif C2_FORCE_FULL_SYMBOLIC_RECV then
-                state:mem():makeSymbolic(dst, n, env.next_sym_tag("c2pid_internetreadfile"))
-            end
-            n = apply_net_gate(state, dst, req_n, n, "internetreadfile")
-        end
-        if out_n ~= nil and out_n ~= 0 then
-            state:mem():write(out_n, n, 4)
-        end
-        arm_compare_window(state)
-        log_recv_observe("InternetReadFile", state, retaddr, dst, req_n, n)
-        common.write_ret(state, 1)
-        instrumentation_state:skipFunction(true)
+        emulate_read_buffer({
+            api_name = "InternetReadFile",
+            state = state,
+            instrumentation_state = instrumentation_state,
+            retaddr = retaddr,
+            dst = dst,
+            req_n = req_n,
+            out_n = out_n,
+            buffer_name = "InternetReadFile buffer",
+            template_tag = "c2pid_internetreadfilefmt",
+            symbolic_tag = "c2pid_internetreadfile",
+            gate_tag = "internetreadfile",
+            ret_value = 1,
+        })
     end
 
     function api.hook_winhttpreaddata(state, instrumentation_state, is_call)
@@ -744,26 +757,20 @@ function M.attach(api, env)
             return
         end
         print(string.format("[c2pid] enter WinHttpReadData req_n=%s", tostring(req_n)))
-        local n = 0
-        if common.ensure_ptr_readable(state, dst, "WinHttpReadData buffer") then
-            n = responses.inject(common, state, dst, req_n)
-            if n == nil or n <= 0 then
-                n, _ = apply_recv_template(state, dst, req_n, "c2pid_winhttpreaddatafmt")
-                if n == nil or n <= 0 then
-                    n = symbolicize_net_buffer(state, dst, req_n, "c2pid_winhttpreaddata")
-                end
-            elseif C2_FORCE_FULL_SYMBOLIC_RECV then
-                state:mem():makeSymbolic(dst, n, env.next_sym_tag("c2pid_winhttpreaddata"))
-            end
-            n = apply_net_gate(state, dst, req_n, n, "winhttpreaddata")
-        end
-        if out_n ~= nil and out_n ~= 0 then
-            state:mem():write(out_n, n, 4)
-        end
-        arm_compare_window(state)
-        log_recv_observe("WinHttpReadData", state, retaddr, dst, req_n, n)
-        common.write_ret(state, 1)
-        instrumentation_state:skipFunction(true)
+        emulate_read_buffer({
+            api_name = "WinHttpReadData",
+            state = state,
+            instrumentation_state = instrumentation_state,
+            retaddr = retaddr,
+            dst = dst,
+            req_n = req_n,
+            out_n = out_n,
+            buffer_name = "WinHttpReadData buffer",
+            template_tag = "c2pid_winhttpreaddatafmt",
+            symbolic_tag = "c2pid_winhttpreaddata",
+            gate_tag = "winhttpreaddata",
+            ret_value = 1,
+        })
     end
 end
 

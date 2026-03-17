@@ -8,6 +8,7 @@ pluginsConfig.LuaFunctionInstrumentation.instrumentation =
     pluginsConfig.LuaFunctionInstrumentation.instrumentation or {}
 
 local M = {}
+local api_registry = dofile("c2pid/core/api_registry.lua")
 
 M.g_fi = pluginsConfig.LuaFunctionInstrumentation.instrumentation
 M.g_module_map = nil
@@ -46,6 +47,39 @@ function M.ensure_plugins()
     if ok_wm then
         M.g_windows_monitor = wm
     end
+end
+
+function M.get_current_module(state, pc)
+    M.ensure_plugins()
+    if not M.g_module_map then
+        return nil
+    end
+
+    local ok, md = pcall(function()
+        if pc ~= nil then
+            return M.g_module_map:getModule(state, pc)
+        end
+        return M.g_module_map:getModule(state)
+    end)
+    if not ok then
+        return nil
+    end
+    return md
+end
+
+function M.get_pid_from_windows_monitor(state)
+    M.ensure_plugins()
+    if not M.g_windows_monitor then
+        return nil
+    end
+
+    local ok, pid = pcall(function()
+        return M.g_windows_monitor:getPid(state)
+    end)
+    if not ok or pid == nil then
+        return nil
+    end
+    return tonumber(pid)
 end
 
 function M.is_x64(state)
@@ -213,40 +247,30 @@ function M.to_hex(s)
     return table.concat(out, " ")
 end
 
-function M.add_hook_entry(key, module_name, handler_name, pc)
+function M.get_hook_meta(api_name)
+    return api_registry.get_hook_meta(api_name)
+end
+
+function M.add_hook_entry(key, module_name, handler_name, pc, api_name)
+    local meta = M.get_hook_meta(api_name)
     M.g_fi[key] = {
         module_name = module_name,
         name = handler_name,
         pc = pc,
-        param_count = 0,
-        fork = false,
-        convention = "cdecl",
+        param_count = meta.param_count,
+        fork = meta.fork,
+        convention = meta.convention,
     }
 end
 
 function M.get_module_for_pc(state, pc)
-    M.ensure_plugins()
     if pc == nil then
         return nil
     end
-    if not M.g_module_map then
-        return nil
-    end
 
-    local md = nil
-    local ok1, res1 = pcall(function()
-        return M.g_module_map:getModule(state, pc)
-    end)
-    if ok1 then
-        md = res1
-    end
+    local md = M.get_current_module(state, pc)
     if md == nil then
-        local ok2, res2 = pcall(function()
-            return M.g_module_map:getModule(state)
-        end)
-        if ok2 then
-            md = res2
-        end
+        md = M.get_current_module(state)
     end
     if md == nil then
         return nil

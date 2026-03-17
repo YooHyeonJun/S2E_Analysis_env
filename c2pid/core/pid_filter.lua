@@ -1,14 +1,17 @@
 local M = {}
 local target_profile = dofile("c2pid/core/target_profile.lua").load()
+local common = dofile("c2pid/core/common.lua")
+local cfg = dofile("c2pid/core/config.lua").load_pid_filter(target_profile)
 
-local g_wm = nil
-local g_module_map = nil
-local plugins_inited = false
-local tracked_pid = tonumber(os.getenv("S2E_TARGET_PID") or "")
+local tracked_pid = cfg.tracked_pid
+local tracked_pids = {}
+if tracked_pid ~= nil then
+    tracked_pids[tracked_pid] = true
+end
 local target_modules = {}
-local DEBUG = (os.getenv("S2E_C2PID_DEBUG") or "0") == "1"
-local KILL_NON_TARGET_AFTER_TRACK = (os.getenv("S2E_C2_KILL_NON_TARGET_AFTER_TRACK") or "1") == "1"
-local GLOBAL_TRACE = (os.getenv("S2E_C2_GLOBAL_TRACE") or "0") == "1"
+local DEBUG = cfg.debug
+local KILL_NON_TARGET_AFTER_TRACK = cfg.kill_non_target_after_track
+local GLOBAL_TRACE = cfg.global_trace
 local seen_mod_pid = {}
 local state_target_pid = {}
 local active_target_count = {}
@@ -78,62 +81,39 @@ if ped and ped.moduleNames then
 end
 
 if next(target_modules) == nil then
-    target_modules[target_profile.target_module] = true
-end
-
-local function ensure_plugins()
-    if plugins_inited then
-        return
-    end
-    plugins_inited = true
-
-    if g_s2e == nil then
-        return
-    end
-
-    local ok1, wm = pcall(function()
-        return g_s2e:getPlugin("WindowsMonitor")
-    end)
-    if ok1 then
-        g_wm = wm
-    end
-
-    local ok2, mm = pcall(function()
-        return g_s2e:getPlugin("ModuleMap")
-    end)
-    if ok2 then
-        g_module_map = mm
-    end
+    target_modules[cfg.target_module] = true
 end
 
 local function get_current_module(state)
-    ensure_plugins()
-    if not g_module_map then
-        return nil
-    end
-    local ok, md = pcall(function()
-        return g_module_map:getModule(state)
-    end)
-    if not ok then
-        return nil
-    end
-    return md
+    return common.get_current_module(state)
 end
 
 local function get_pid_from_windows_monitor(state)
-    ensure_plugins()
-    if not g_wm then
-        return nil
-    end
+    return common.get_pid_from_windows_monitor(state)
+end
 
-    local ok, pid = pcall(function()
-        return g_wm:getPid(state)
-    end)
-    if not ok or pid == nil then
-        return nil
-    end
+local function has_tracked_pid()
+    return next(tracked_pids) ~= nil
+end
 
-    return tonumber(pid)
+local function track_pid(pid, mod, hook_tag, reason)
+    pid = tonumber(pid)
+    if pid == nil then
+        return false
+    end
+    if tracked_pids[pid] then
+        if tracked_pid == nil then
+            tracked_pid = pid
+        end
+        return false
+    end
+    tracked_pids[pid] = true
+    if tracked_pid == nil then
+        tracked_pid = pid
+    end
+    print(string.format("[c2pid] tracking pid=0x%x by %s module=%s (hook=%s)",
+        pid, tostring(reason), tostring(mod), tostring(hook_tag)))
+    return true
 end
 
 function M.current_pid(state)
@@ -176,13 +156,11 @@ function M.observe(state, hook_tag)
         end
     end
 
-    if tracked_pid == nil and mod ~= nil then
+    if mod ~= nil then
         if target_modules[mod] then
-            tracked_pid = pid
-            print(string.format("[c2pid] tracking pid=0x%x by module=%s (hook=%s)", pid, mod, hook_tag))
+            track_pid(pid, mod, hook_tag, "module")
         elseif net_modules[mod] and net_hooks[hook_tag] then
-            tracked_pid = pid
-            print(string.format("[c2pid] tracking pid=0x%x by netapi module=%s (hook=%s)", pid, mod, hook_tag))
+            track_pid(pid, mod, hook_tag, "netapi")
         end
     end
 
@@ -190,22 +168,22 @@ function M.observe(state, hook_tag)
         return true
     end
 
-    if tracked_pid == nil then
+    if not has_tracked_pid() then
         return false
     end
 
-    if pid == tracked_pid then
+    if tracked_pids[pid] then
         if skey ~= nil and state_target_pid[skey] == nil then
-            state_target_pid[skey] = tracked_pid
-            active_target_count[tracked_pid] = (active_target_count[tracked_pid] or 0) + 1
+            state_target_pid[skey] = pid
+            active_target_count[pid] = (active_target_count[pid] or 0) + 1
             if DEBUG then
                 print(string.format("[c2pid] target-enter hook=%s sidkey=%s pid=0x%x active=%d",
-                    tostring(hook_tag), skey, tracked_pid, active_target_count[tracked_pid]))
+                    tostring(hook_tag), skey, pid, active_target_count[pid]))
             end
         end
     end
 
-    return pid == tracked_pid
+    return tracked_pids[pid] == true
 end
 
 function M.get_tracked_pid()
@@ -253,6 +231,15 @@ function M.mark_target_exit(state, hook_tag)
     mark_state_left_target(state, hook_tag or "target_exit")
 end
 
+function M.forget_state(state)
+    local skey = tostring(state)
+    if skey == nil then
+        return
+    end
+    exited_target_state[skey] = nil
+    mark_state_left_target(state, "forget_state")
+end
+
 function M.should_kill_non_target(state, hook_tag)
     if GLOBAL_TRACE then
         return false
@@ -261,7 +248,7 @@ function M.should_kill_non_target(state, hook_tag)
     if not KILL_NON_TARGET_AFTER_TRACK then
         return false
     end
-    if tracked_pid == nil then
+    if not has_tracked_pid() then
         return false
     end
 
@@ -281,19 +268,19 @@ function M.should_kill_non_target(state, hook_tag)
         end
     end
 
-    if pid ~= tracked_pid then
+    if not tracked_pids[pid] then
         if total_active_targets() == 0 then
             if DEBUG then
                 print(string.format(
-                    "[c2pid] kill-nontarget-empty-queue hook=%s current_pid=0x%x current_mod=%s tracked_pid=0x%x",
-                    tostring(hook_tag), pid, tostring(mod), tracked_pid))
+                    "[c2pid] kill-nontarget-empty-queue hook=%s current_pid=0x%x current_mod=%s tracked_pid=%s",
+                    tostring(hook_tag), pid, tostring(mod), tostring(tracked_pid)))
             end
             return true
         end
         if DEBUG then
             print(string.format(
-                "[c2pid] kill-nontarget hook=%s current_pid=0x%x current_mod=%s tracked_pid=0x%x",
-                tostring(hook_tag), pid, tostring(mod), tracked_pid))
+                "[c2pid] kill-nontarget hook=%s current_pid=0x%x current_mod=%s tracked_pid=%s",
+                tostring(hook_tag), pid, tostring(mod), tostring(tracked_pid)))
         end
         return true
     end
