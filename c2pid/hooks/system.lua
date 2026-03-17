@@ -15,6 +15,7 @@ function M.attach(api, env)
     local should_sample_getproc = env.should_sample_getproc
     local next_keystate_value = env.next_keystate_value
     local should_sample_keystate = env.should_sample_keystate
+    local check_hot_keystate_poll = env.check_hot_keystate_poll
     local should_handle = env.should_handle
     local trace_api_passthrough = env.trace_api_passthrough
     local on_thread_create_call = env.on_thread_create_call
@@ -284,7 +285,7 @@ function M.attach(api, env)
             push_pending(pending_getproc, sid, {
                 hmod = hmod, fn = fn, retaddr = retaddr, should_log = false, repeat_n = 0,
             })
-            local should_log, seen_n = should_sample_getproc(retaddr, fn)
+            local should_log, seen_n = should_sample_getproc(state, retaddr, fn)
             local q = pending_getproc[sid]
             if q ~= nil and #q > 0 then
                 q[#q].should_log = should_log
@@ -550,7 +551,7 @@ function M.attach(api, env)
         local vkey = common.read_arg(state, 1) or 0
         if C2_FORCE_KEYSTATE then
             local ret = next_keystate_value(vkey)
-            local should_log, seen_n = should_sample_keystate("GetKeyState", retaddr, vkey)
+            local should_log, seen_n = should_sample_keystate(state, "GetKeyState", retaddr, vkey)
             common.write_ret(state, ret)
             if should_log then
                 emit_trace("interesting_api", state, retaddr,
@@ -569,9 +570,17 @@ function M.attach(api, env)
         end
         local retaddr = common.read_retaddr(state)
         local vkey = common.read_arg(state, 1) or 0
+        local should_kill, poll_n = check_hot_keystate_poll(state, "GetAsyncKeyState", retaddr)
+        if should_kill then
+            emit_trace("interesting_api", state, retaddr,
+                string.format("api=GetAsyncKeyState phase=hotpoll vkey=0x%x repeat=%d action=kill_state", vkey, poll_n))
+            kill_target_state_now(state, instrumentation_state,
+                string.format("c2pid: hot GetAsyncKeyState polling at 0x%x repeat=%d", retaddr or 0, poll_n))
+            return
+        end
         if C2_FORCE_KEYSTATE then
             local ret = next_keystate_value(vkey)
-            local should_log, seen_n = should_sample_keystate("GetAsyncKeyState", retaddr, vkey)
+            local should_log, seen_n = should_sample_keystate(state, "GetAsyncKeyState", retaddr, vkey)
             common.write_ret(state, ret)
             if should_log then
                 emit_trace("interesting_api", state, retaddr,
@@ -600,7 +609,7 @@ function M.attach(api, env)
                 state:mem():write(buf + pressed_vk, 0x80, 1)
             end
             common.write_ret(state, 1)
-            local should_log, seen_n = should_sample_keystate("GetKeyboardState", retaddr, buf)
+            local should_log, seen_n = should_sample_keystate(state, "GetKeyboardState", retaddr, buf)
             if should_log then
                 emit_trace("interesting_api", state, retaddr,
                     string.format("api=GetKeyboardState phase=forced buf=0x%x ret=1 vk=0x%x repeat=%d",

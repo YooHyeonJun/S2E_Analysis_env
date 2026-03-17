@@ -155,6 +155,7 @@ local function parse_pe_exports(path)
     end
 
     local export_rva = read_u32(buf, data_dir_off + 0) or 0
+    local export_size = read_u32(buf, data_dir_off + 4) or 0
     local exports = {}
     if export_rva == 0 then
         return { image_base = image_base, exports = exports }, nil
@@ -183,7 +184,13 @@ local function parse_pe_exports(path)
                     local name = read_cstr(buf, name_off)
                     local func_rva = read_u32(buf, func_rva_off)
                     if name ~= nil and name ~= "" and func_rva ~= nil and func_rva ~= 0 then
-                        exports[name] = func_rva
+                        local is_forwarded = false
+                        if export_size > 0 then
+                            is_forwarded = func_rva >= export_rva and func_rva < (export_rva + export_size)
+                        end
+                        if not is_forwarded then
+                            exports[name] = func_rva
+                        end
                     end
                 end
             end

@@ -38,6 +38,7 @@ function M.build(common, pid_filter, responses)
     local C2_KEYSTATE_PERIOD = config.C2_KEYSTATE_PERIOD
     local C2_KEYSTATE_LOG_BURST = config.C2_KEYSTATE_LOG_BURST
     local C2_KEYSTATE_LOG_EVERY = config.C2_KEYSTATE_LOG_EVERY
+    local C2_KEYSTATE_HOT_POLL_THRESHOLD = config.C2_KEYSTATE_HOT_POLL_THRESHOLD
     local C2_GETPROC_LOG_BURST = config.C2_GETPROC_LOG_BURST
     local C2_GETPROC_LOG_EVERY = config.C2_GETPROC_LOG_EVERY
     local C2_FORCE_RECV_N = config.C2_FORCE_RECV_N
@@ -73,6 +74,7 @@ function M.build(common, pid_filter, responses)
     local last_create_path = {}
     local getproc_seen = {}
     local keystate_seen = {}
+    local keystate_hot_seen = {}
     local keystate_tick = 0
     local keystate_tick_ref = { value = 0 }
 
@@ -697,14 +699,20 @@ function M.build(common, pid_filter, responses)
         return common.try_read_cstr(state, p_str, common.clamp(n, 0, max_chars or 260))
     end
 
-    local function should_sample_getproc(retaddr, fn)
+    local function should_sample_getproc(state, retaddr, fn)
         local name = string.lower(tostring(fn or ""))
         if name ~= "getkeystate" and name ~= "getasynckeystate" and name ~= "getkeyboardstate" then
             return true, 1
         end
+        local sid = common.state_id(state)
+        local seen = getproc_seen[sid]
+        if seen == nil then
+            seen = {}
+            getproc_seen[sid] = seen
+        end
         local key = string.format("0x%x:%s", retaddr or 0, name)
-        local n = (getproc_seen[key] or 0) + 1
-        getproc_seen[key] = n
+        local n = (seen[key] or 0) + 1
+        seen[key] = n
         if n <= C2_GETPROC_LOG_BURST then
             return true, n
         end
@@ -726,10 +734,16 @@ function M.build(common, pid_filter, responses)
         return 0
     end
 
-    local function should_sample_keystate(tag, retaddr, arg)
+    local function should_sample_keystate(state, tag, retaddr, arg)
+        local sid = common.state_id(state)
+        local seen = keystate_seen[sid]
+        if seen == nil then
+            seen = {}
+            keystate_seen[sid] = seen
+        end
         local key = string.format("%s:0x%x:%s", tostring(tag), retaddr or 0, tostring(arg or 0))
-        local n = (keystate_seen[key] or 0) + 1
-        keystate_seen[key] = n
+        local n = (seen[key] or 0) + 1
+        seen[key] = n
         if n <= C2_KEYSTATE_LOG_BURST then
             return true, n
         end
@@ -737,6 +751,23 @@ function M.build(common, pid_filter, responses)
             return true, n
         end
         return false, n
+    end
+
+    local function check_hot_keystate_poll(state, tag, retaddr)
+        local threshold = tonumber(C2_KEYSTATE_HOT_POLL_THRESHOLD or 0) or 0
+        if threshold <= 0 then
+            return false, 0
+        end
+        local sid = common.state_id(state)
+        local seen = keystate_hot_seen[sid]
+        if seen == nil then
+            seen = {}
+            keystate_hot_seen[sid] = seen
+        end
+        local key = string.format("%s:0x%x", tostring(tag), retaddr or 0)
+        local n = (seen[key] or 0) + 1
+        seen[key] = n
+        return n >= threshold, n
     end
 
     local function cleanup_state_data(state)
@@ -763,6 +794,9 @@ function M.build(common, pid_filter, responses)
         handle_to_path[sid] = nil
         handle_to_dump[sid] = nil
         last_create_path[sid] = nil
+        getproc_seen[sid] = nil
+        keystate_seen[sid] = nil
+        keystate_hot_seen[sid] = nil
         if responses.cleanup_state ~= nil then
             responses.cleanup_state(state)
         end
@@ -879,6 +913,7 @@ function M.build(common, pid_filter, responses)
         should_sample_getproc = should_sample_getproc,
         next_keystate_value = next_keystate_value,
         should_sample_keystate = should_sample_keystate,
+        check_hot_keystate_poll = check_hot_keystate_poll,
         should_handle = should_handle,
         trace_api_passthrough = trace_api_passthrough,
         trace_export_entry = trace_export_entry,
@@ -930,6 +965,7 @@ function M.build(common, pid_filter, responses)
         C2_FORCE_CONNECT_CALL = C2_FORCE_CONNECT_CALL,
         C2_FORCE_KEYSTATE = C2_FORCE_KEYSTATE,
         C2_KEYSTATE_PERIOD = C2_KEYSTATE_PERIOD,
+        C2_KEYSTATE_HOT_POLL_THRESHOLD = C2_KEYSTATE_HOT_POLL_THRESHOLD,
         C2_GETPROC_LOG_BURST = C2_GETPROC_LOG_BURST,
         C2_FORCE_RECV_N = C2_FORCE_RECV_N,
         C2_FORCE_RECV_USE_REQ = C2_FORCE_RECV_USE_REQ,
@@ -951,6 +987,8 @@ function M.build(common, pid_filter, responses)
     else
         attach_target_exe.attach(api, shared)
     end
+
+    api.cleanup_state_data = cleanup_state_data
 
     return api
 end
