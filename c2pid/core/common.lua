@@ -1,18 +1,24 @@
 add_plugin("FunctionMonitor")
 add_plugin("LuaFunctionInstrumentation")
+add_plugin("LuaInstructionInstrumentation")
 add_plugin("ModuleMap")
 add_plugin("WindowsMonitor")
 
 pluginsConfig.LuaFunctionInstrumentation = pluginsConfig.LuaFunctionInstrumentation or {}
 pluginsConfig.LuaFunctionInstrumentation.instrumentation =
     pluginsConfig.LuaFunctionInstrumentation.instrumentation or {}
+pluginsConfig.LuaInstructionInstrumentation = pluginsConfig.LuaInstructionInstrumentation or {}
+pluginsConfig.LuaInstructionInstrumentation.instrumentation =
+    pluginsConfig.LuaInstructionInstrumentation.instrumentation or {}
 
 local M = {}
 local api_registry = dofile("c2pid/core/api_registry.lua")
 
 M.g_fi = pluginsConfig.LuaFunctionInstrumentation.instrumentation
+M.g_ii = pluginsConfig.LuaInstructionInstrumentation.instrumentation
 M.g_module_map = nil
 M.g_windows_monitor = nil
+M.g_windows_monitor_failed = false
 M.plugins_inited = false
 M._sid_seq = 1
 M._sid_map = {}
@@ -69,7 +75,7 @@ end
 
 function M.get_pid_from_windows_monitor(state)
     M.ensure_plugins()
-    if not M.g_windows_monitor then
+    if not M.g_windows_monitor or M.g_windows_monitor_failed then
         return nil
     end
 
@@ -77,6 +83,7 @@ function M.get_pid_from_windows_monitor(state)
         return M.g_windows_monitor:getPid(state)
     end)
     if not ok or pid == nil then
+        M.g_windows_monitor_failed = true
         return nil
     end
     return tonumber(pid)
@@ -263,6 +270,14 @@ function M.add_hook_entry(key, module_name, handler_name, pc, api_name)
     }
 end
 
+function M.add_instruction_hook_entry(key, module_name, handler_name, pc)
+    M.g_ii[key] = {
+        module_name = module_name,
+        name = handler_name,
+        pc = pc,
+    }
+end
+
 function M.get_module_for_pc(state, pc)
     if pc == nil then
         return nil
@@ -317,6 +332,76 @@ function M.format_callsite(state, retaddr)
         return string.format("%s+0x%x", md.name, off), md.name
     end
     return md.name, md.name
+end
+
+local function split_csv_l(s)
+    local out = {}
+    if s == nil or s == "" then
+        return out
+    end
+    for tok in string.gmatch(s, "([^,]+)") do
+        local t = string.lower((tok or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+        if t ~= "" then
+            out[#out + 1] = t
+        end
+    end
+    return out
+end
+
+-- Heuristic stack scan:
+-- reads pointer-sized values from current SP and treats mapped code pointers as return sites.
+function M.find_stack_origin(state, target_module, opts)
+    opts = opts or {}
+    local scan_words = tonumber(opts.scan_words or 64) or 64
+    local max_chain = tonumber(opts.max_chain or 12) or 12
+    local skip_modules_csv = opts.skip_modules_csv or
+        "ntdll.dll,kernel32.dll,kernelbase.dll,ws2_32.dll,msvcrt.dll,ucrtbase.dll,vcruntime140.dll,vcruntime140_1.dll"
+    local skip_modules = {}
+    local i
+    for _, n in ipairs(split_csv_l(skip_modules_csv)) do
+        skip_modules[n] = true
+    end
+    local target_l = string.lower(target_module or "")
+    local ps = M.ptr_size(state)
+    local sp = state:regs():getSp()
+    local chain = {}
+    local first_target = nil
+    local first_user = nil
+
+    for i = 0, scan_words - 1 do
+        local p = state:mem():readPointer(sp + (i * ps))
+        if p ~= nil and p ~= 0 then
+            local md = M.get_module_for_pc(state, p)
+            if md ~= nil and md.name ~= nil then
+                local site = nil
+                if md.base ~= nil and p >= md.base then
+                    site = string.format("%s+0x%x", md.name, p - md.base)
+                else
+                    site = md.name
+                end
+
+                if #chain == 0 or chain[#chain] ~= site then
+                    chain[#chain + 1] = site
+                end
+                if #chain >= max_chain then
+                    break
+                end
+
+                if first_target == nil and target_l ~= "" and md.name == target_l then
+                    first_target = site
+                end
+                if first_user == nil and not skip_modules[md.name] then
+                    first_user = site
+                end
+            end
+        end
+    end
+
+    return {
+        first_target = first_target,
+        first_user = first_user,
+        chain = chain,
+    }
 end
 
 return M

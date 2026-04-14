@@ -3,13 +3,14 @@ local M = {}
 function M.attach(api, env)
     local common = env.common
     local should_handle_compare = env.should_handle_compare
-    local allow_compare_window = env.allow_compare_window
     local callsite_allowed = env.callsite_allowed
     local clamp_prefix = env.clamp_prefix
     local constrain_bytes_by_write = env.constrain_bytes_by_write
     local log_compare = env.log_compare
     local kv_escape = env.kv_escape
     local emit_trace = env.emit_trace
+    local record_origin_copy = env.record_origin_copy
+    local trace_origin_compare = env.trace_origin_compare
 
     local C2_TRACE_COMPARE = env.C2_TRACE_COMPARE
     local C2_LOG_BYTES = env.C2_LOG_BYTES
@@ -43,9 +44,6 @@ function M.attach(api, env)
             return
         end
         local retaddr = common.read_retaddr(state)
-        if not allow_compare_window(state, retaddr) then
-            return
-        end
         if C2_TRACE_COMPARE then
             print(string.format("[c2pid] %s hit is_call=%s", api_name, tostring(true)))
         end
@@ -56,9 +54,15 @@ function M.attach(api, env)
         local la = #(sa or "")
         local lb = #(sb or "")
         local lmax = math.max(la, lb)
+        local cmp_len = common.clamp(lmax + 1, 1, C2_LOG_BYTES) or 1
+        local ba = common.try_read_bytes(state, a, cmp_len)
+        local bb = common.try_read_bytes(state, b, cmp_len)
         emit_trace("compare", state, retaddr,
             string.format("api=%s len=%d la=%d lb=%d rhs=%s",
                 api_name, lmax, la, lb, kv_escape(common.as_printable_escaped(sb or ""))))
+        if trace_origin_compare ~= nil then
+            trace_origin_compare(state, retaddr, api_name, a, b, cmp_len, ba, bb, (sa == sb) and 0 or 1)
+        end
         if C2_TRACE_COMPARE and (sa ~= nil or sb ~= nil) then
             print(string.format("[c2pid] %s a=%s b=%s",
                 api_name,
@@ -86,9 +90,6 @@ function M.attach(api, env)
             return
         end
         local retaddr = common.read_retaddr(state)
-        if not allow_compare_window(state, retaddr) then
-            return
-        end
         if C2_TRACE_COMPARE then
             print(string.format("[c2pid] %s hit is_call=%s", api_name, tostring(true)))
         end
@@ -101,6 +102,9 @@ function M.attach(api, env)
         emit_trace("compare", state, retaddr,
             string.format("api=%s len=%d rhs=%s",
                 api_name, n, kv_escape(common.as_printable_escaped(bb or ""))))
+        if trace_origin_compare ~= nil then
+            trace_origin_compare(state, retaddr, api_name, a, b, n, ba, bb, (ba ~= nil and bb ~= nil and ba == bb) and 0 or 1)
+        end
         if C2_TRACE_COMPARE and (ba ~= nil or bb ~= nil) then
             print(string.format("[c2pid] %s n=%d a_hex=%s b_hex=%s", api_name, n,
                 ba and common.to_hex(ba) or "<nil>",
@@ -151,6 +155,38 @@ function M.attach(api, env)
             return
         end
         handle_block_compare("memcmp", state, instrumentation_state)
+    end
+
+    local function handle_copy(api_name, state, is_call)
+        if not is_call then
+            return
+        end
+        if not should_handle_compare(state, true, api_name) then
+            return
+        end
+        local retaddr = common.read_retaddr(state)
+        local dst = common.read_arg(state, 1) or 0
+        local src = common.read_arg(state, 2) or 0
+        local n = common.read_arg(state, 3) or 0
+        if record_origin_copy ~= nil then
+            record_origin_copy(state, retaddr, api_name, dst, src, n)
+        end
+    end
+
+    function api.hook_memcpy(state, instrumentation_state, is_call)
+        handle_copy("memcpy", state, is_call)
+    end
+
+    function api.hook_memmove(state, instrumentation_state, is_call)
+        handle_copy("memmove", state, is_call)
+    end
+
+    function api.hook_rtlmovememory(state, instrumentation_state, is_call)
+        handle_copy("RtlMoveMemory", state, is_call)
+    end
+
+    function api.hook_rtlcopymemory(state, instrumentation_state, is_call)
+        handle_copy("RtlCopyMemory", state, is_call)
     end
 end
 

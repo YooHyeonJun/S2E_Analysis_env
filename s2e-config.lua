@@ -169,7 +169,7 @@ end
 -- setting configureAllModules = true
 
 add_plugin("ModuleExecutionDetector")
-local med_target_module = os.getenv("S2E_TARGET_MODULE") or "test.exe"
+local med_target_module = os.getenv("S2E_TARGET_MODULE") or "target.exe"
 pluginsConfig.ModuleExecutionDetector = {
     mod_0 = {
         moduleName = med_target_module,
@@ -206,7 +206,7 @@ pluginsConfig.ForkLimiter = {
 -- ModuleExecutionDetector.
 
 add_plugin("ProcessExecutionDetector")
-local ped_target_module = os.getenv("S2E_TARGET_MODULE") or "test.exe"
+local ped_target_module = os.getenv("S2E_TARGET_MODULE") or "target.exe"
 pluginsConfig.ProcessExecutionDetector = {
     moduleNames = {
 
@@ -354,7 +354,7 @@ add_plugin("WindowsMonitor")
 -- the target program counter when it encounters a call instructions.
 
 add_plugin("GuestCodeHooking")
-local gch_target_module = os.getenv("S2E_TARGET_MODULE") or "test.exe"
+local gch_target_module = os.getenv("S2E_TARGET_MODULE") or "target.exe"
 pluginsConfig.GuestCodeHooking = {
   moduleNames = {
       gch_target_module,
@@ -423,6 +423,42 @@ add_plugin("LuaBindings")
 -- the LuaCoreEvents.cpp source file for a list of availble events.
 -------------------------------------------------------------------------------
 add_plugin("LuaCoreEvents")
+
+-- Handshake/branch analysis helper:
+-- logs fork decisions that look related to recv/read/network symbolic data.
+local enable_hsbranch = (os.getenv("S2E_ENABLE_HSBRANCH") or "1") == "1"
+if enable_hsbranch then
+    add_plugin("HandshakeBranchTracker")
+    pluginsConfig.HandshakeBranchTracker = {
+        -- Prefix/hints used to detect relevant symbolic vars/conditions.
+        symbolHints = {
+            "recv",
+            "read",
+            "net",
+            "sock",
+            "handshake",
+            "payload",
+            "hs_",
+        },
+
+        -- Repeated tracked fork-decide at same pc => stall candidate.
+        stallThreshold = 50,
+
+        -- Number of tracked forks before reporting promotion candidate.
+        promotionForkThreshold = 2,
+
+        -- Truncate huge SMT expressions in logs.
+        maxConditionString = 220,
+        -- Emit compact branch meaning summary every N decisions per PC.
+        branchReportInterval = 25,
+        -- Extract/print compare operand style, consts, and recv-offset usage.
+        logCondDetails = true,
+
+        -- Keep this off to reduce log spam.
+        logAllForkDecides = false,
+        logAllForks = true,
+    }
+end
 
 -- This configuration shows an example that kills states if they fork in
 -- a specific module.

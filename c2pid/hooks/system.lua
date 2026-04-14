@@ -27,6 +27,7 @@ function M.attach(api, env)
     local sanitize_name = env.sanitize_name
     local basename_path = env.basename_path
     local should_extract_path = env.should_extract_path
+    local target_profile = env.target_profile
 
     local pending_writefile = env.pending_writefile
     local pending_createfile = env.pending_createfile
@@ -42,12 +43,67 @@ function M.attach(api, env)
     local last_create_path = env.last_create_path
 
     local C2_EXTRACT_PAYLOADS = env.C2_EXTRACT_PAYLOADS
-    local C2_FORCE_LASTERROR = env.C2_FORCE_LASTERROR
     local C2_FORCE_KEYSTATE = env.C2_FORCE_KEYSTATE
     local C2_KEYSTATE_PERIOD = env.C2_KEYSTATE_PERIOD
     local C2_KILL_ON_TARGET_EXIT = env.C2_KILL_ON_TARGET_EXIT
     local C2_SUPPRESS_TARGET_EXIT = env.C2_SUPPRESS_TARGET_EXIT
     local C2_GETPROC_LOG_BURST = env.C2_GETPROC_LOG_BURST
+    local STACK_ORIGIN_TRACE = (os.getenv("S2E_C2_TRACE_STACK_ORIGIN") or "1") == "1"
+    local STACK_ORIGIN_SCAN_WORDS = tonumber(os.getenv("S2E_C2_STACK_SCAN_WORDS") or "64") or 64
+    local STACK_ORIGIN_MAX_CHAIN = tonumber(os.getenv("S2E_C2_STACK_MAX_CHAIN") or "12") or 12
+    local STACK_ORIGIN_SKIP_MODULES = os.getenv("S2E_C2_STACK_SKIP_MODULES") or
+        "ntdll.dll,kernel32.dll,kernelbase.dll,ws2_32.dll,msvcrt.dll,ucrtbase.dll,vcruntime140.dll,vcruntime140_1.dll"
+
+    local PROCESS_INFO_CLASS_NAMES = {
+        [0] = "ProcessBasicInformation",
+        [7] = "ProcessDebugPort",
+        [26] = "ProcessWow64Information",
+        [27] = "ProcessImageFileName",
+        [29] = "ProcessBreakOnTermination",
+        [30] = "ProcessDebugObjectHandle",
+        [31] = "ProcessDebugFlags",
+    }
+
+    local function trace_crypto_passthrough(state, is_call, api_name_s, extra)
+        if not should_handle(state, is_call, api_name_s) then
+            return
+        end
+        trace_api_passthrough(state, is_call, api_name_s, extra)
+    end
+
+    local function build_stack_origin_extra(state)
+        if not STACK_ORIGIN_TRACE then
+            return ""
+        end
+        local target_module = "target.exe"
+        if target_profile ~= nil and target_profile.target_module ~= nil and target_profile.target_module ~= "" then
+            target_module = target_profile.target_module
+        end
+        local so = common.find_stack_origin(state, target_module, {
+            scan_words = STACK_ORIGIN_SCAN_WORDS,
+            max_chain = STACK_ORIGIN_MAX_CHAIN,
+            skip_modules_csv = STACK_ORIGIN_SKIP_MODULES,
+        })
+        if so == nil then
+            return ""
+        end
+        local chain = table.concat(so.chain or {}, ">")
+        return string.format(" stack_target=%s stack_user=%s stack_chain=%s",
+            kv_escape(so.first_target or "-"),
+            kv_escape(so.first_user or "-"),
+            kv_escape(chain ~= "" and chain or "-"))
+    end
+
+    local function api_name(state, default_name, native_name)
+        local md = common.get_current_module(state)
+        if md ~= nil then
+            local name = string.lower(md:getName() or "")
+            if name == "ntdll.dll" then
+                return native_name
+            end
+        end
+        return default_name
+    end
 
     local function append_memory_dump(state, sid, api_name, remote_handle, remote_base, src, req, retaddr)
         if not C2_EXTRACT_PAYLOADS or src == nil or src == 0 then
@@ -373,16 +429,9 @@ function M.attach(api, env)
                 return
             end
             local retaddr = common.read_retaddr(state)
-            if C2_FORCE_LASTERROR ~= nil then
-                local forced = math.floor(C2_FORCE_LASTERROR)
-                common.write_ret(state, forced)
-                emit_trace("interesting_api", state, retaddr,
-                    string.format("api=GetLastError phase=forced code=%d", forced))
-                instrumentation_state:skipFunction(true)
-                return
-            end
             push_pending(pending_getlasterror, sid, { retaddr = retaddr })
-            emit_trace("interesting_api", state, retaddr, "api=GetLastError phase=call")
+            emit_trace("interesting_api", state, retaddr,
+                "api=GetLastError phase=call" .. build_stack_origin_extra(state))
             return
         end
         local info = pop_pending(pending_getlasterror, sid)
@@ -392,6 +441,16 @@ function M.attach(api, env)
         local err = read_ret_ptr(state) or 0
         emit_trace("interesting_api", state, info.retaddr,
             string.format("api=GetLastError phase=ret code=%d", err))
+    end
+
+    function api.hook_setlasterror(state, instrumentation_state, is_call)
+        if not should_handle(state, is_call, "SetLastError") then
+            return
+        end
+        local retaddr = common.read_retaddr(state)
+        local code = common.read_arg(state, 1) or 0
+        emit_trace("interesting_api", state, retaddr,
+            string.format("api=SetLastError phase=call code=%d", code))
     end
 
     function api.hook_openprocess(state, instrumentation_state, is_call)
@@ -534,13 +593,295 @@ function M.attach(api, env)
         trace_api_passthrough(state, is_call, "GetVersionExW", string.format("info=0x%x", info_ptr))
     end
 
+    function api.hook_rtlgetversion(state, instrumentation_state, is_call)
+        local info_ptr = common.read_arg(state, 1) or 0
+        trace_api_passthrough(state, is_call, "RtlGetVersion", string.format("info=0x%x", info_ptr))
+    end
+
     function api.hook_ntqueryinformationprocess(state, instrumentation_state, is_call)
         local hproc = common.read_arg(state, 1) or 0
         local info_class = common.read_arg(state, 2) or 0
         local buf = common.read_arg(state, 3) or 0
         local len = common.read_arg(state, 4) or 0
+        local class_name = PROCESS_INFO_CLASS_NAMES[info_class]
+        local extra = string.format("hproc=0x%x class=%d buf=0x%x len=%d", hproc, info_class, buf, len)
+        if class_name ~= nil then
+            extra = extra .. " name=" .. class_name
+        end
         trace_api_passthrough(state, is_call, "NtQueryInformationProcess",
-            string.format("hproc=0x%x class=%d buf=0x%x len=%d", hproc, info_class, buf, len))
+            extra)
+    end
+
+    function api.hook_cryptacquirecontexta(state, instrumentation_state, is_call)
+        local prov_type = common.read_arg(state, 4) or 0
+        local flags = common.read_arg(state, 5) or 0
+        trace_crypto_passthrough(state, is_call, "CryptAcquireContextA",
+            string.format("provtype=%d flags=0x%x", prov_type, flags))
+    end
+
+    function api.hook_cryptacquirecontextw(state, instrumentation_state, is_call)
+        local prov_type = common.read_arg(state, 4) or 0
+        local flags = common.read_arg(state, 5) or 0
+        trace_crypto_passthrough(state, is_call, "CryptAcquireContextW",
+            string.format("provtype=%d flags=0x%x", prov_type, flags))
+    end
+
+    function api.hook_cryptreleasecontext(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "CryptReleaseContext", string.format("hprov=0x%x", hprov))
+    end
+
+    function api.hook_cryptgenkey(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        local algid = common.read_arg(state, 2) or 0
+        local flags = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptGenKey",
+            string.format("hprov=0x%x algid=0x%x flags=0x%x", hprov, algid, flags))
+    end
+
+    function api.hook_cryptimportkey(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        local pbdata = common.read_arg(state, 2) or 0
+        local len = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptImportKey",
+            string.format("hprov=0x%x in=0x%x len=%d", hprov, pbdata, len))
+    end
+
+    function api.hook_cryptdestroykey(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "CryptDestroyKey", string.format("hkey=0x%x", hkey))
+    end
+
+    function api.hook_cryptcreatehash(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        local algid = common.read_arg(state, 2) or 0
+        trace_crypto_passthrough(state, is_call, "CryptCreateHash",
+            string.format("hprov=0x%x algid=0x%x", hprov, algid))
+    end
+
+    function api.hook_crypthashdata(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        local pb = common.read_arg(state, 2) or 0
+        local cb = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptHashData",
+            string.format("hhash=0x%x in=0x%x len=%d", hhash, pb, cb))
+    end
+
+    function api.hook_cryptderivekey(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        local algid = common.read_arg(state, 2) or 0
+        local hbase = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptDeriveKey",
+            string.format("hprov=0x%x algid=0x%x hbase=0x%x", hprov, algid, hbase))
+    end
+
+    function api.hook_cryptgethashparam(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        local param = common.read_arg(state, 2) or 0
+        local pb = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptGetHashParam",
+            string.format("hhash=0x%x param=%d out=0x%x", hhash, param, pb))
+    end
+
+    function api.hook_cryptsethashparam(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        local param = common.read_arg(state, 2) or 0
+        local pb = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "CryptSetHashParam",
+            string.format("hhash=0x%x param=%d in=0x%x", hhash, param, pb))
+    end
+
+    function api.hook_cryptencrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local hhash = common.read_arg(state, 2) or 0
+        local final = common.read_arg(state, 3) or 0
+        local flags = common.read_arg(state, 4) or 0
+        local pbdata = common.read_arg(state, 5) or 0
+        local pcb = common.read_arg(state, 6) or 0
+        trace_crypto_passthrough(state, is_call, "CryptEncrypt",
+            string.format("hkey=0x%x hhash=0x%x final=%d flags=0x%x buf=0x%x lenptr=0x%x",
+                hkey, hhash, final, flags, pbdata, pcb))
+    end
+
+    function api.hook_cryptdecrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local hhash = common.read_arg(state, 2) or 0
+        local final = common.read_arg(state, 3) or 0
+        local flags = common.read_arg(state, 4) or 0
+        local pbdata = common.read_arg(state, 5) or 0
+        local pcb = common.read_arg(state, 6) or 0
+        trace_crypto_passthrough(state, is_call, "CryptDecrypt",
+            string.format("hkey=0x%x hhash=0x%x final=%d flags=0x%x buf=0x%x lenptr=0x%x",
+                hkey, hhash, final, flags, pbdata, pcb))
+    end
+
+    function api.hook_systemfunction032(state, instrumentation_state, is_call)
+        local data = common.read_arg(state, 1) or 0
+        local key = common.read_arg(state, 2) or 0
+        trace_crypto_passthrough(state, is_call, "SystemFunction032",
+            string.format("data=0x%x key=0x%x", data, key))
+    end
+
+    function api.hook_systemfunction033(state, instrumentation_state, is_call)
+        local data = common.read_arg(state, 1) or 0
+        local key = common.read_arg(state, 2) or 0
+        trace_crypto_passthrough(state, is_call, "SystemFunction033",
+            string.format("data=0x%x key=0x%x", data, key))
+    end
+
+    function api.hook_cryptprotectdata(state, instrumentation_state, is_call)
+        local in_blob = common.read_arg(state, 1) or 0
+        local out_blob = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "CryptProtectData",
+            string.format("inblob=0x%x outblob=0x%x", in_blob, out_blob))
+    end
+
+    function api.hook_cryptunprotectdata(state, instrumentation_state, is_call)
+        local in_blob = common.read_arg(state, 1) or 0
+        local out_blob = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "CryptUnprotectData",
+            string.format("inblob=0x%x outblob=0x%x", in_blob, out_blob))
+    end
+
+    function api.hook_bcryptopenalgorithmprovider(state, instrumentation_state, is_call)
+        local algid = try_read_wstr(state, common.read_arg(state, 2), 128) or "<nil>"
+        local impl = try_read_wstr(state, common.read_arg(state, 3), 128) or "<nil>"
+        local flags = common.read_arg(state, 4) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptOpenAlgorithmProvider",
+            string.format("alg=%s impl=%s flags=0x%x", kv_escape(algid), kv_escape(impl), flags))
+    end
+
+    function api.hook_bcryptclosealgorithmprovider(state, instrumentation_state, is_call)
+        local halg = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptCloseAlgorithmProvider", string.format("halg=0x%x", halg))
+    end
+
+    function api.hook_bcryptsetproperty(state, instrumentation_state, is_call)
+        local hobj = common.read_arg(state, 1) or 0
+        local prop = try_read_wstr(state, common.read_arg(state, 2), 128) or "<nil>"
+        local pb = common.read_arg(state, 3) or 0
+        local cb = common.read_arg(state, 4) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptSetProperty",
+            string.format("h=0x%x prop=%s buf=0x%x len=%d", hobj, kv_escape(prop), pb, cb))
+    end
+
+    function api.hook_bcryptgeneratesymmetrickey(state, instrumentation_state, is_call)
+        local halg = common.read_arg(state, 1) or 0
+        local hkey_ptr = common.read_arg(state, 2) or 0
+        local secret = common.read_arg(state, 5) or 0
+        local secret_len = common.read_arg(state, 6) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptGenerateSymmetricKey",
+            string.format("halg=0x%x hkeyptr=0x%x secret=0x%x secret_len=%d", halg, hkey_ptr, secret, secret_len))
+    end
+
+    function api.hook_bcryptimportkey(state, instrumentation_state, is_call)
+        local halg = common.read_arg(state, 1) or 0
+        local blob = common.read_arg(state, 3) or 0
+        local hkey_ptr = common.read_arg(state, 4) or 0
+        local pb = common.read_arg(state, 7) or 0
+        local cb = common.read_arg(state, 8) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptImportKey",
+            string.format("halg=0x%x blobtype=0x%x hkeyptr=0x%x in=0x%x len=%d", halg, blob, hkey_ptr, pb, cb))
+    end
+
+    function api.hook_bcryptcreatehash(state, instrumentation_state, is_call)
+        local halg = common.read_arg(state, 1) or 0
+        local hhash_ptr = common.read_arg(state, 2) or 0
+        local secret = common.read_arg(state, 5) or 0
+        local secret_len = common.read_arg(state, 6) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptCreateHash",
+            string.format("halg=0x%x hhashptr=0x%x secret=0x%x secret_len=%d", halg, hhash_ptr, secret, secret_len))
+    end
+
+    function api.hook_bcrypthashdata(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        local pb = common.read_arg(state, 2) or 0
+        local cb = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptHashData",
+            string.format("hhash=0x%x in=0x%x len=%d", hhash, pb, cb))
+    end
+
+    function api.hook_bcryptfinishhash(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        local pb = common.read_arg(state, 2) or 0
+        local cb = common.read_arg(state, 3) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptFinishHash",
+            string.format("hhash=0x%x out=0x%x len=%d", hhash, pb, cb))
+    end
+
+    function api.hook_bcryptdestroyhash(state, instrumentation_state, is_call)
+        local hhash = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptDestroyHash", string.format("hhash=0x%x", hhash))
+    end
+
+    function api.hook_bcryptencrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local in_buf = common.read_arg(state, 2) or 0
+        local in_len = common.read_arg(state, 3) or 0
+        local out_buf = common.read_arg(state, 5) or 0
+        local out_len = common.read_arg(state, 6) or 0
+        local out_res = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptEncrypt",
+            string.format("hkey=0x%x in=0x%x in_len=%d out=0x%x out_len=%d out_res=0x%x",
+                hkey, in_buf, in_len, out_buf, out_len, out_res))
+    end
+
+    function api.hook_bcryptdecrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local in_buf = common.read_arg(state, 2) or 0
+        local in_len = common.read_arg(state, 3) or 0
+        local out_buf = common.read_arg(state, 5) or 0
+        local out_len = common.read_arg(state, 6) or 0
+        local out_res = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptDecrypt",
+            string.format("hkey=0x%x in=0x%x in_len=%d out=0x%x out_len=%d out_res=0x%x",
+                hkey, in_buf, in_len, out_buf, out_len, out_res))
+    end
+
+    function api.hook_bcryptdestroykey(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "BCryptDestroyKey", string.format("hkey=0x%x", hkey))
+    end
+
+    function api.hook_ncryptencrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local in_buf = common.read_arg(state, 2) or 0
+        local in_len = common.read_arg(state, 3) or 0
+        local out_buf = common.read_arg(state, 5) or 0
+        local out_len = common.read_arg(state, 6) or 0
+        local out_res = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "NCryptEncrypt",
+            string.format("hkey=0x%x in=0x%x in_len=%d out=0x%x out_len=%d out_res=0x%x",
+                hkey, in_buf, in_len, out_buf, out_len, out_res))
+    end
+
+    function api.hook_ncryptdecrypt(state, instrumentation_state, is_call)
+        local hkey = common.read_arg(state, 1) or 0
+        local in_buf = common.read_arg(state, 2) or 0
+        local in_len = common.read_arg(state, 3) or 0
+        local out_buf = common.read_arg(state, 5) or 0
+        local out_len = common.read_arg(state, 6) or 0
+        local out_res = common.read_arg(state, 7) or 0
+        trace_crypto_passthrough(state, is_call, "NCryptDecrypt",
+            string.format("hkey=0x%x in=0x%x in_len=%d out=0x%x out_len=%d out_res=0x%x",
+                hkey, in_buf, in_len, out_buf, out_len, out_res))
+    end
+
+    function api.hook_ncryptimportkey(state, instrumentation_state, is_call)
+        local hprov = common.read_arg(state, 1) or 0
+        local import_key = common.read_arg(state, 2) or 0
+        local blob = common.read_arg(state, 3) or 0
+        local hkey_ptr = common.read_arg(state, 4) or 0
+        local pb = common.read_arg(state, 7) or 0
+        local cb = common.read_arg(state, 8) or 0
+        trace_crypto_passthrough(state, is_call, "NCryptImportKey",
+            string.format("hprov=0x%x import=0x%x blob=0x%x hkeyptr=0x%x in=0x%x len=%d",
+                hprov, import_key, blob, hkey_ptr, pb, cb))
+    end
+
+    function api.hook_ncryptfreeobject(state, instrumentation_state, is_call)
+        local hobj = common.read_arg(state, 1) or 0
+        trace_crypto_passthrough(state, is_call, "NCryptFreeObject", string.format("h=0x%x", hobj))
     end
 
     function api.hook_getkeystate(state, instrumentation_state, is_call)
@@ -787,37 +1128,43 @@ function M.attach(api, env)
     end
 
     function api.hook_exitprocess(state, instrumentation_state, is_call)
-        if not should_handle(state, is_call, "ExitProcess") then
+        local tag = api_name(state, "ExitProcess", "RtlExitUserProcess")
+        if not should_handle(state, is_call, tag) then
             return
         end
         local retaddr = common.read_retaddr(state)
         if C2_SUPPRESS_TARGET_EXIT then
-            emit_trace("interesting_api", state, retaddr, "api=ExitProcess phase=forced suppress=1")
+            emit_trace("interesting_api", state, retaddr,
+                string.format("api=%s phase=forced suppress=1", tag))
             instrumentation_state:skipFunction(true)
             return
         end
-        emit_trace("interesting_api", state, retaddr, "api=ExitProcess")
+        emit_trace("interesting_api", state, retaddr, string.format("api=%s", tag))
         if C2_KILL_ON_TARGET_EXIT then
-            pid_filter.mark_target_exit(state, "ExitProcess")
-            kill_target_state_now(state, instrumentation_state, "c2pid: target ExitProcess")
+            pid_filter.mark_target_exit(state, tag)
+            kill_target_state_now(state, instrumentation_state,
+                string.format("c2pid: target %s", tag))
         end
     end
 
     function api.hook_terminateprocess(state, instrumentation_state, is_call)
-        if not should_handle(state, is_call, "TerminateProcess") then
+        local tag = api_name(state, "TerminateProcess", "NtTerminateProcess")
+        if not should_handle(state, is_call, tag) then
             return
         end
         local retaddr = common.read_retaddr(state)
         if C2_SUPPRESS_TARGET_EXIT then
-            emit_trace("interesting_api", state, retaddr, "api=TerminateProcess phase=forced suppress=1")
+            emit_trace("interesting_api", state, retaddr,
+                string.format("api=%s phase=forced suppress=1", tag))
             common.write_ret(state, 1)
             instrumentation_state:skipFunction(true)
             return
         end
-        emit_trace("interesting_api", state, retaddr, "api=TerminateProcess")
+        emit_trace("interesting_api", state, retaddr, string.format("api=%s", tag))
         if C2_KILL_ON_TARGET_EXIT then
-            pid_filter.mark_target_exit(state, "TerminateProcess")
-            kill_target_state_now(state, instrumentation_state, "c2pid: target TerminateProcess")
+            pid_filter.mark_target_exit(state, tag)
+            kill_target_state_now(state, instrumentation_state,
+                string.format("c2pid: target %s", tag))
         end
     end
 

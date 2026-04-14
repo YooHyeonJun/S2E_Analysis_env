@@ -23,18 +23,40 @@ RECV_FORMAT="${S2E_C2_RECV_FORMAT:-}"
 GUIDE_COMPARE="${S2E_C2_GUIDE_COMPARE:-0}"
 TRACE_COMPARE="${S2E_C2_TRACE_COMPARE:-1}"
 COMPARE_BYPASS_PID="${S2E_C2_COMPARE_BYPASS_PID:-1}"
-DEFAULT_TARGET_MODULE="${S2E_TARGET_MODULE:-test.exe}"
+DEFAULT_TARGET_MODULE="${S2E_TARGET_MODULE:-target.exe}"
 COMPARE_FALLBACK_MODULES="${S2E_C2_COMPARE_FALLBACK_MODULES:-${DEFAULT_TARGET_MODULE},msvcrt.dll,ucrtbase.dll,kernel32.dll}"
 COMPARE_AFTER_NET_ONLY="${S2E_C2_COMPARE_AFTER_NET_ONLY:-1}"
 COMPARE_AFTER_NET_BUDGET="${S2E_C2_COMPARE_AFTER_NET_BUDGET:-8}"
+USER_SCEN_FILE="${S2E_C2_SCENARIO_FILE:-}"
+USER_SCEN_NAME="${S2E_C2_SCENARIO:-}"
 
 cd "$ROOT_DIR"
 mkdir -p "$LOG_DIR"
 
 chmod +x c2pid/autoinfer_from_log.sh c2pid/extract_solver_model.sh
 
-# Always refresh inferred scenario from the latest log.
-c2pid/autoinfer_from_log.sh "$SEED_LOG" "$SEED_SCEN"
+write_fallback_seed_scenario() {
+  cat > "$SEED_SCEN" <<'LUA'
+-- Auto-generated fallback scenario (no compare candidates found in seed log)
+C2_SCENARIOS = C2_SCENARIOS or {}
+C2_SCENARIOS.auto_inferred = {
+    name = "auto-inferred-fallback",
+    responses = {
+        "PING\n",
+        "OK\n",
+        "ACK\n",
+    },
+    symbolic_ranges = {},
+}
+LUA
+}
+
+# Refresh inferred scenario from the latest log.
+# If no compare candidates are found, keep loop alive with a fallback seed.
+if ! c2pid/autoinfer_from_log.sh "$SEED_LOG" "$SEED_SCEN"; then
+  echo "warning: autoinfer failed for $SEED_LOG; using fallback seed scenario" >&2
+  write_fallback_seed_scenario
+fi
 
 # Build a hybrid scenario from inferred responses.
 # Keep symbolic range tight to avoid tainting unrelated OS/device paths.
@@ -91,11 +113,20 @@ awk '
   }
 ' "$SEED_SCEN" > "$HYBRID_SCEN"
 
+RUN_SCEN_FILE="$HYBRID_SCEN"
+RUN_SCEN_NAME="auto_hybrid"
+if [[ -n "$USER_SCEN_FILE" ]]; then
+  RUN_SCEN_FILE="$USER_SCEN_FILE"
+fi
+if [[ -n "$USER_SCEN_NAME" ]]; then
+  RUN_SCEN_NAME="$USER_SCEN_NAME"
+fi
+
 echo c2pid > input-mode.txt
 
 S2E_C2_MODE=hybrid \
-S2E_C2_SCENARIO_FILE="$HYBRID_SCEN" \
-S2E_C2_SCENARIO=auto_hybrid \
+S2E_C2_SCENARIO_FILE="$RUN_SCEN_FILE" \
+S2E_C2_SCENARIO="$RUN_SCEN_NAME" \
 S2E_C2_DISABLE_INJECT="$DISABLE_INJECT" \
 S2E_C2_TRACE_COMPARE="$TRACE_COMPARE" \
 S2E_C2_GUIDE_COMPARE="$GUIDE_COMPARE" \

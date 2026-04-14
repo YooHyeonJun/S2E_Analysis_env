@@ -279,8 +279,12 @@ if [ "${RUN_TARGET_INIT:-1}" = "1" ]; then
     target_init
 fi
 
+TARGET_HOST_FILE="${S2E_TARGET_FILE:-target.exe}"
+TARGET_GUEST_BASENAME="${S2E_TARGET_GUEST_BASENAME:-$(basename "${TARGET_HOST_FILE}")}"
+TARGET_PATH="${S2E_TARGET_GUEST_PATH:-c:\\s2e\\${TARGET_GUEST_BASENAME}}"
+
 # Download the target file to analyze
-${S2ECMD} get "test.exe"
+${S2ECMD} get "${TARGET_HOST_FILE}" "${TARGET_GUEST_BASENAME}"
 ${S2ECMD} get "dll-run.txt" > /dev/null 2> /dev/null || true
 
 # Resolve mode in this order:
@@ -302,7 +306,6 @@ if [ "${INPUT_MODE}" = "file" ]; then
 fi
 
 # Run the analysis
-TARGET_PATH='c:\s2e\test.exe'
 RUN_DLL_MODE="${RUN_DLL:-0}"
 DLL_NAME="${S2E_DLL_NAME:-}"
 DLL_EXPORT="${S2E_DLL_EXPORT:-Install}"
@@ -367,6 +370,9 @@ if [ "${RUN_DLL_MODE}" = "1" ]; then
         echo "[dllmulti] end idx=${EXP_IDX}/${EXP_TOTAL} dll=${DLL_NAME} export=${EXP_NAME} rc=${EXP_RC}"
     done
 else
+    if [ ! -f "${TARGET_GUEST_BASENAME}" ]; then
+        ${S2ECMD} kill 1 "Could not fetch target ${TARGET_HOST_FILE} from host project dir"
+    fi
     prepare_target "${TARGET_PATH}"
 
     if [ "${INPUT_MODE}" = "api" ] || [ "${INPUT_MODE}" = "c2" ] || [ "${INPUT_MODE}" = "c2pid" ]; then

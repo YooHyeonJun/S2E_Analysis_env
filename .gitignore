@@ -22,3 +22,12 @@ sid1_h294_2110453.dll
 guest-tools32
 guest-tools64
 guestfs
+
+
+# User custom ignores
+0
+profiles/
+*.log
+target.exe
+test_lua_escape.lua
+input-mode.txt

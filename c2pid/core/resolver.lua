@@ -25,6 +25,14 @@ if EXTRA_HOOKS == nil or EXTRA_HOOKS:match("^%s*$") then
 end
 local DLL_ARCH = cfg.DLL_ARCH
 
+local function env_enabled(name, default)
+    local v = os.getenv(name)
+    if v == nil or v == "" then
+        return default
+    end
+    return v == "1"
+end
+
 local function file_exists(path)
     local f = io.open(path, "rb")
     if f then
@@ -110,10 +118,13 @@ local function parse_pe_exports(path)
 
     local image_base
     local data_dir_off
+    local entry_rva
     if magic == 0x20B then
+        entry_rva = read_u32(buf, opt + 16)
         image_base = read_u64(buf, opt + 24)
         data_dir_off = opt + 112
     elseif magic == 0x10B then
+        entry_rva = read_u32(buf, opt + 16)
         image_base = read_u32(buf, opt + 28)
         data_dir_off = opt + 96
     else
@@ -158,7 +169,7 @@ local function parse_pe_exports(path)
     local export_size = read_u32(buf, data_dir_off + 4) or 0
     local exports = {}
     if export_rva == 0 then
-        return { image_base = image_base, exports = exports }, nil
+        return { image_base = image_base, entry_rva = entry_rva, exports = exports }, nil
     end
 
     local exp_off = rva_to_off(export_rva)
@@ -197,7 +208,7 @@ local function parse_pe_exports(path)
         end
     end
 
-    return { image_base = image_base, exports = exports }, nil
+    return { image_base = image_base, entry_rva = entry_rva, exports = exports }, nil
 end
 
 local function resolve_module_path(module_name)
@@ -303,6 +314,55 @@ local function register_explicit_hooks(common, handlers)
     return total
 end
 
+local function register_target_entry_hook(common, handlers)
+    if target_profile.kind ~= "exe" then
+        return 0
+    end
+
+    local path = resolve_module_path(target_profile.target_module)
+    if not path then
+        print("[c2pid] target module file not found for entry hook: " .. tostring(target_profile.target_module))
+        return 0
+    end
+
+    local pe, err = parse_pe_exports(path)
+    if not pe then
+        print(string.format("[c2pid] parse target entry failed for %s: %s",
+            target_profile.target_module, tostring(err)))
+        return 0
+    end
+
+    local entry_rva = pe.entry_rva
+    local image_base = pe.image_base
+    local fn = handlers.hook_target_entry
+    if fn == nil or entry_rva == nil or entry_rva == 0 or image_base == nil then
+        return 0
+    end
+
+    _G.hook_target_entry = fn
+    local module_key = target_profile.target_module:gsub("[^%w_]", "_")
+    local base_key = string.format("c2pid_%s_entry_%x", module_key, entry_rva)
+    common.add_hook_entry(base_key .. "_rva", target_profile.target_module, "hook_target_entry", entry_rva)
+    common.add_hook_entry(base_key .. "_base", target_profile.target_module, "hook_target_entry", image_base + entry_rva)
+    if env_enabled("S2E_C2_INST_SELFTEST_ENTRY", true) then
+        -- Always arm one instruction probe on the target entry point so probe
+        -- plumbing can be validated even when custom probe lists miss runtime paths.
+        common.add_instruction_hook_entry(
+            base_key .. "_inst_rva",
+            target_profile.target_module,
+            "c2pid_instruction_probe",
+            entry_rva)
+        common.add_instruction_hook_entry(
+            base_key .. "_inst_base",
+            target_profile.target_module,
+            "c2pid_instruction_probe",
+            image_base + entry_rva)
+        print(string.format("[c2pid] %s: entry-inst-probe=0x%x", target_profile.target_module, entry_rva))
+    end
+    print(string.format("[c2pid] %s: entry-hook=0x%x", target_profile.target_module, entry_rva))
+    return 2
+end
+
 function M.register_export_hooks(common, handlers)
     local total = 0
     local dll_name, apis
@@ -339,6 +399,7 @@ function M.register_export_hooks(common, handlers)
         end
     end
     total = total + register_explicit_hooks(common, handlers)
+    total = total + register_target_entry_hook(common, handlers)
     return total
 end
 

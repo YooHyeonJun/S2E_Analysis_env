@@ -13,6 +13,7 @@ local DEBUG = cfg.debug
 local KILL_NON_TARGET_AFTER_TRACK = cfg.kill_non_target_after_track
 local GLOBAL_TRACE = cfg.global_trace
 local seen_mod_pid = {}
+local seen_base_pid_mod = {}
 local state_target_pid = {}
 local active_target_count = {}
 local exited_target_state = {}
@@ -33,6 +34,7 @@ local net_hooks = {
     WSAEventSelect = true,
     WSAEnumNetworkEvents = true,
     WSAGetLastError = true,
+    WSASetLastError = true,
     ioctlsocket = true,
     accept = true,
     select = true,
@@ -88,6 +90,42 @@ local function get_current_module(state)
     return common.get_current_module(state)
 end
 
+local function get_module_name_and_base(md)
+    if md == nil then
+        return nil, nil
+    end
+    local name = nil
+    local base = nil
+
+    local ok_name, res_name = pcall(function()
+        return md:getName()
+    end)
+    if ok_name then
+        name = res_name
+    end
+
+    local ok_base, res_base = pcall(function()
+        return md:getLoadBase()
+    end)
+    if ok_base then
+        base = res_base
+    end
+
+    if base == nil then
+        local ok_base2, res_base2 = pcall(function()
+            return md:getBase()
+        end)
+        if ok_base2 then
+            base = res_base2
+        end
+    end
+
+    if name ~= nil then
+        name = string.lower(name)
+    end
+    return name, base
+end
+
 local function get_pid_from_windows_monitor(state)
     return common.get_pid_from_windows_monitor(state)
 end
@@ -117,17 +155,13 @@ local function track_pid(pid, mod, hook_tag, reason)
 end
 
 function M.current_pid(state)
-    -- Prefer WindowsMonitor when Lua bindings are available.
-    local wm_pid = get_pid_from_windows_monitor(state)
-    if wm_pid ~= nil then
-        local md = get_current_module(state)
-        local mod_name = md and string.lower(md:getName()) or nil
-        return wm_pid, mod_name
-    end
-
-    -- Fallback path that always works with current setup.
+    -- Prefer ModuleMap because WindowsMonitor is not always exposed to Lua.
     local md = get_current_module(state)
     if not md then
+        local wm_pid = get_pid_from_windows_monitor(state)
+        if wm_pid ~= nil then
+            return wm_pid, nil
+        end
         return nil, nil
     end
     return tonumber(md:getPid()), string.lower(md:getName())
@@ -153,6 +187,21 @@ function M.observe(state, hook_tag)
             seen_mod_pid[key] = true
             print(string.format("[c2pid] observe hook=%s pid=0x%x mod=%s tracked=%s",
                 hook_tag, pid, tostring(mod), tostring(tracked_pid)))
+        end
+    end
+
+    if mod ~= nil and target_modules[mod] then
+        local md = get_current_module(state)
+        local md_name, md_base = get_module_name_and_base(md)
+        local pc = state:regs():getPc() or 0
+        if md_name ~= nil and md_base ~= nil then
+            local bkey = string.format("%x:%s:%x", pid, md_name, md_base)
+            if not seen_base_pid_mod[bkey] then
+                seen_base_pid_mod[bkey] = true
+                print(string.format(
+                    "[c2pid] target-module-base pid=0x%x module=%s base=0x%x pc=0x%x",
+                    pid, md_name, md_base, pc))
+            end
         end
     end
 

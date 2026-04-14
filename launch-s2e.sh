@@ -10,6 +10,8 @@ ENV_DIR="/home/tako/hjyoo/s2e"
 INSTALL_DIR="$ENV_DIR/install"
 BUILD_DIR="$ENV_DIR/build"
 BUILD=debug
+QEMU_OVERRIDE="${S2E_QEMU_OVERRIDE:-}"
+LIBS2E_OVERRIDE="${S2E_LIBS2E_OVERRIDE:-}"
 
 # Either s2e for symbolic execution support or s2e_sp for single-path mode
 S2E_MODE=s2e
@@ -27,6 +29,44 @@ fi
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+PROFILE_NAME="${S2E_PROFILE:-default}"
+PROFILE_DIR="${S2E_PROFILE_DIR:-$PROJECT_DIR/profiles/$PROFILE_NAME}"
+PROFILE_ENV_FILE="${S2E_PROFILE_ENV:-$PROFILE_DIR/profile.env}"
+PROFILE_LOCAL_ENV_FILE="${S2E_PROFILE_LOCAL_ENV:-$PROFILE_DIR/profile.local.env}"
+
+load_profile_env() {
+    local file
+    for file in "$PROFILE_ENV_FILE" "$PROFILE_LOCAL_ENV_FILE"; do
+        if [ -f "$file" ]; then
+            set -a
+            # shellcheck disable=SC1090
+            . "$file"
+            set +a
+        fi
+    done
+}
+
+pick_profile_file() {
+    local explicit="$1"
+    local profile_candidate="$2"
+    local fallback="$3"
+
+    if [ -n "$explicit" ]; then
+        echo "$explicit"
+        return
+    fi
+    if [ -n "$profile_candidate" ] && [ -f "$profile_candidate" ]; then
+        echo "$profile_candidate"
+        return
+    fi
+    echo "$fallback"
+}
+
+load_profile_env
+
+export S2E_PROFILE="$PROFILE_NAME"
+export S2E_PROFILE_DIR="$PROFILE_DIR"
+export S2E_PROFILE_ENV="$PROFILE_ENV_FILE"
 
 IMAGE_PATH="$ENV_DIR/images/windows-10pro1909-x86_64/image.raw.s2e"
 IMAGE_JSON="$(dirname $IMAGE_PATH)/image.json"
@@ -70,16 +110,15 @@ export S2E_SHARED_DIR=$INSTALL_DIR/share/libs2e
 export S2E_MAX_PROCESSES=1
 export S2E_UNBUFFERED_STREAM=1
 export S2E_PROJECT_DIR="$PROJECT_DIR"
+export S2E_PROFILE_DIR="$PROFILE_DIR"
 
 # Project defaults for c2pid workflow (can be overridden from shell).
 export S2E_C2_MODE="${S2E_C2_MODE:-hybrid}"
-export S2E_C2_SCENARIO_FILE="${S2E_C2_SCENARIO_FILE:-$PROJECT_DIR/c2-scenarios.hybrid.lua}"
+export S2E_C2_SCENARIO_FILE="$(pick_profile_file "${S2E_C2_SCENARIO_FILE:-}" "$PROFILE_DIR/c2-scenarios.lua" "$PROJECT_DIR/c2-scenarios.hybrid.lua")"
 export S2E_C2_SCENARIO="${S2E_C2_SCENARIO:-auto_hybrid}"
 export S2E_C2_TRACE_COMPARE="${S2E_C2_TRACE_COMPARE:-1}"
 export S2E_C2_GUIDE_COMPARE="${S2E_C2_GUIDE_COMPARE:-0}"
 export S2E_C2_FORCE_COMPARE_PASS="${S2E_C2_FORCE_COMPARE_PASS:-1}"
-export S2E_C2_COMPARE_AFTER_NET_ONLY="${S2E_C2_COMPARE_AFTER_NET_ONLY:-1}"
-export S2E_C2_COMPARE_AFTER_NET_BUDGET="${S2E_C2_COMPARE_AFTER_NET_BUDGET:-64}"
 export S2E_C2PID_DEBUG="${S2E_C2PID_DEBUG:-1}"
 export S2E_C2_KILL_NON_TARGET_AFTER_TRACK="${S2E_C2_KILL_NON_TARGET_AFTER_TRACK:-1}"
 export S2E_C2_GLOBAL_TRACE="${S2E_C2_GLOBAL_TRACE:-0}"
@@ -91,24 +130,43 @@ export S2E_C2_GATE_SIZE_VALUE="${S2E_C2_GATE_SIZE_VALUE:-n}"
 export S2E_C2_GATE_MAGIC_OFF="${S2E_C2_GATE_MAGIC_OFF:--1}"
 export S2E_C2_GATE_MAGIC_HEX="${S2E_C2_GATE_MAGIC_HEX:-}"
 export S2E_C2_GATE_MAGIC_PATCHES="${S2E_C2_GATE_MAGIC_PATCHES:-}"
-export S2E_C2_FORCE_NET_EMULATION="${S2E_C2_FORCE_NET_EMULATION:-0}"
+export S2E_C2_FORCE_NET_EMULATION="${S2E_C2_FORCE_NET_EMULATION:-1}"
 export S2E_C2_FORCE_NET_PROGRESS="${S2E_C2_FORCE_NET_PROGRESS:-1}"
 export S2E_C2_FORCE_CONNECT_CALL="${S2E_C2_FORCE_CONNECT_CALL:-1}"
+export S2E_C2_FORCE_GETHOSTBYNAME="${S2E_C2_FORCE_GETHOSTBYNAME:-0}"
+export S2E_C2_FORCE_GETHOSTBYADDR="${S2E_C2_FORCE_GETHOSTBYADDR:-0}"
+export S2E_C2_FORCE_DNS_IP="${S2E_C2_FORCE_DNS_IP:-}"
+export S2E_C2_FORCE_CONNECT_REDIRECT_IP="${S2E_C2_FORCE_CONNECT_REDIRECT_IP:-}"
+export S2E_C2_FORCE_CONNECT_REDIRECT_PORT="${S2E_C2_FORCE_CONNECT_REDIRECT_PORT:-}"
 export S2E_C2_FORCE_RECV_N="${S2E_C2_FORCE_RECV_N:-64}"
 export S2E_C2_FORCE_RECV_USE_REQ="${S2E_C2_FORCE_RECV_USE_REQ:-1}"
+export S2E_C2_RECV_FORMAT="${S2E_C2_RECV_FORMAT:-}"
+export S2E_C2_FORCE_RECV_PATTERN="${S2E_C2_FORCE_RECV_PATTERN:-zero}"
+export S2E_C2_FORCE_RECV_EOF_AFTER="${S2E_C2_FORCE_RECV_EOF_AFTER:-64}"
+export S2E_C2_SYMBOLIC_SITES_FILE="$(pick_profile_file "${S2E_C2_SYMBOLIC_SITES_FILE:-}" "$PROFILE_DIR/c2-symbolic-sites.lua" "$PROJECT_DIR/c2-symbolic-sites.lua")"
+export S2E_C2_SYMBOLIC_RECV_RETADDRS="${S2E_C2_SYMBOLIC_RECV_RETADDRS:-}"
+export S2E_C2_SYMBOLIC_WSARECV_RETADDRS="${S2E_C2_SYMBOLIC_WSARECV_RETADDRS:-}"
+export S2E_C2_SYMBOLIC_RECVFROM_RETADDRS="${S2E_C2_SYMBOLIC_RECVFROM_RETADDRS:-}"
+export S2E_C2_SYMBOLIC_INTERNETREADFILE_RETADDRS="${S2E_C2_SYMBOLIC_INTERNETREADFILE_RETADDRS:-}"
+export S2E_C2_SYMBOLIC_WINHTTPREADDATA_RETADDRS="${S2E_C2_SYMBOLIC_WINHTTPREADDATA_RETADDRS:-}"
 export S2E_C2_FORCE_SELECT_READY="${S2E_C2_FORCE_SELECT_READY:-1}"
+export S2E_C2_KILL_NET_LOOP="${S2E_C2_KILL_NET_LOOP:-1}"
+export S2E_C2_NET_LOOP_THRESHOLD="${S2E_C2_NET_LOOP_THRESHOLD:-16}"
 export S2E_C2_DISABLE_INJECT="${S2E_C2_DISABLE_INJECT:-1}"
-export S2E_C2_KILL_ON_TARGET_EXIT="${S2E_C2_KILL_ON_TARGET_EXIT:-0}"
-export S2E_C2_SUPPRESS_TARGET_EXIT="${S2E_C2_SUPPRESS_TARGET_EXIT:-1}"
+export S2E_C2_KILL_ON_TARGET_EXIT="${S2E_C2_KILL_ON_TARGET_EXIT:-1}"
+export S2E_C2_SUPPRESS_TARGET_EXIT="${S2E_C2_SUPPRESS_TARGET_EXIT:-0}"
 export S2E_DISABLE_DEFENDER="${S2E_DISABLE_DEFENDER:-1}"
 export RUN_TARGET_INIT="${RUN_TARGET_INIT:-1}"
 export S2E_REINSTALL_DRIVER="${S2E_REINSTALL_DRIVER:-0}"
 export S2E_INPUT_MODE="${S2E_INPUT_MODE:-c2pid}"
+export S2E_TARGET_FILE="${S2E_TARGET_FILE:-target.exe}"
+export S2E_TARGET_GUEST_BASENAME="${S2E_TARGET_GUEST_BASENAME:-$(basename "$S2E_TARGET_FILE")}"
+export S2E_TARGET_GUEST_PATH="${S2E_TARGET_GUEST_PATH:-c:\\s2e\\$S2E_TARGET_GUEST_BASENAME}"
 
 # Auto-select guest DLL architecture for export resolution.
 # PE32 samples on x64 Windows load user-mode DLLs from SysWOW64.
 if [ -z "${S2E_C2_DLL_ARCH:-}" ]; then
-    if file -L "$PROJECT_DIR/test.exe" 2>/dev/null | grep -q "PE32 executable"; then
+    if file -L "$PROJECT_DIR/$S2E_TARGET_FILE" 2>/dev/null | grep -q "PE32 executable"; then
         export S2E_C2_DLL_ARCH="wow64"
     else
         export S2E_C2_DLL_ARCH="native"
@@ -135,6 +193,25 @@ if [ "x$QEMU_BIOS" != "x" ]; then
     QEMU_ARGS="$QEMU_ARGS $QEMU_BIOS"
     QEMU_ARGS="$QEMU_ARGS -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios"
 fi
+
+archive_run_live_log() {
+    local src="$PROJECT_DIR/run_live.log"
+    local run_dir
+    local dst
+
+    if [ ! -f "$src" ]; then
+        return
+    fi
+
+    run_dir="$(readlink -f "$PROJECT_DIR/s2e-last" 2>/dev/null || true)"
+    if [ -z "$run_dir" ] || [ ! -d "$run_dir" ]; then
+        return
+    fi
+
+    dst="$run_dir/run_live.log"
+    cp -f "$src" "$dst"
+    echo "Archived live log to $dst"
+}
 
 if [ "x$DEBUG" != "x" ]; then
 
@@ -177,14 +254,31 @@ EOF
     #    -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios
 
     $GDB $QEMU $QEMU_ARGS $*
+    STATUS=$?
+    archive_run_live_log
+    exit $STATUS
 
 else
     QEMU="$INSTALL_DIR/bin/qemu-system-x86_64"
     LIBS2E="$INSTALL_DIR/share/libs2e/libs2e-x86_64-$S2E_MODE.so"
+
+    if [ -n "$QEMU_OVERRIDE" ]; then
+        QEMU="$QEMU_OVERRIDE"
+    fi
+
+    if [ -n "$LIBS2E_OVERRIDE" ]; then
+        LIBS2E="$LIBS2E_OVERRIDE"
+    fi
+
+    echo "Using QEMU: $QEMU"
+    echo "Using libs2e: $LIBS2E"
 
     LD_PRELOAD=$LIBS2E $QEMU $QEMU_ARGS $* &
 
     CHILD_PID=$!
     trap "kill $CHILD_PID" SIGINT
     wait $CHILD_PID
+    STATUS=$?
+    archive_run_live_log
+    exit $STATUS
 fi

@@ -34,6 +34,17 @@ function M.cleanup_state(state)
 end
 
 local function load_scenario()
+    local function fallback_scenario(reason)
+        if reason ~= nil and reason ~= "" then
+            print(string.format("[c2pid] scenario fallback: %s", tostring(reason)))
+        end
+        return {
+            name = "inline-fallback",
+            responses = {"OK\n"},
+            symbolic_ranges = {},
+        }
+    end
+
     local function decode_escapes(s)
         if type(s) ~= "string" then
             return s
@@ -76,16 +87,21 @@ local function load_scenario()
         safe_load(C2_SCENARIO_FILE)
     end
     if C2_SCENARIOS == nil then
-        return normalize_scenario({
-            name = "inline-fallback",
-            responses = {"OK\n"},
-            symbolic_ranges = {},
-        })
+        return normalize_scenario(fallback_scenario("C2_SCENARIOS not loaded"))
     end
     local name = cfg.C2_SCENARIO
     local sc = C2_SCENARIOS[name]
     if sc == nil then
         sc = C2_SCENARIOS.default
+    end
+    if type(sc) ~= "table" then
+        return normalize_scenario(fallback_scenario(string.format("scenario '%s' missing", tostring(name))))
+    end
+    if type(sc.responses) ~= "table" then
+        sc.responses = {}
+    end
+    if type(sc.symbolic_ranges) ~= "table" then
+        sc.symbolic_ranges = {}
     end
     return normalize_scenario(sc)
 end

@@ -38,17 +38,83 @@ local function env_bool(name, default)
     return v == "1"
 end
 
+local function table_to_csv(list)
+    local out = {}
+    local i
+    if type(list) ~= "table" then
+        return ""
+    end
+    for i = 1, #list do
+        local v = list[i]
+        if type(v) == "number" then
+            out[#out + 1] = string.format("0x%x", math.floor(v))
+        elseif type(v) == "string" and v ~= "" then
+            out[#out + 1] = v
+        end
+    end
+    return table.concat(out, ",")
+end
+
+local function merge_csv(a, b)
+    if a ~= nil and a ~= "" and b ~= nil and b ~= "" then
+        return a .. "," .. b
+    end
+    if a ~= nil and a ~= "" then
+        return a
+    end
+    if b ~= nil and b ~= "" then
+        return b
+    end
+    return ""
+end
+
+local function load_symbolic_sites(path)
+    local ok, data
+    if path == nil or path == "" then
+        return {}
+    end
+    ok, data = pcall(dofile, path)
+    if not ok or type(data) ~= "table" then
+        return {}
+    end
+    return data
+end
+
 function M.load(target_profile)
+    local sites_file = env_str("S2E_C2_SYMBOLIC_SITES_FILE", "")
+    local sites = load_symbolic_sites(sites_file)
+    local recv_sites_csv = merge_csv(
+        env_str("S2E_C2_SYMBOLIC_RECV_RETADDRS", ""),
+        table_to_csv(sites.recv)
+    )
+    local wsarecv_sites_csv = merge_csv(
+        env_str("S2E_C2_SYMBOLIC_WSARECV_RETADDRS", ""),
+        table_to_csv(sites.wsarecv)
+    )
+    local recvfrom_sites_csv = merge_csv(
+        env_str("S2E_C2_SYMBOLIC_RECVFROM_RETADDRS", ""),
+        table_to_csv(sites.recvfrom)
+    )
+    local internetreadfile_sites_csv = merge_csv(
+        env_str("S2E_C2_SYMBOLIC_INTERNETREADFILE_RETADDRS", ""),
+        table_to_csv(sites.internetreadfile or sites.internet_read)
+    )
+    local winhttpreaddata_sites_csv = merge_csv(
+        env_str("S2E_C2_SYMBOLIC_WINHTTPREADDATA_RETADDRS", ""),
+        table_to_csv(sites.winhttpreaddata or sites.winhttp_read)
+    )
+
     return {
         C2_TRACE_COMPARE = env_bool("S2E_C2_TRACE_COMPARE", true),
         C2_LOG_BYTES = env_num("S2E_C2_LOG_BYTES", 64),
+        C2_SEND_DUMP_BYTES = env_num("S2E_C2_SEND_DUMP_BYTES", 256),
+        C2_TRACE_BRANCH_WINDOW = env_bool("S2E_C2_TRACE_BRANCH_WINDOW", true),
+        C2_TRACE_BRANCH_WINDOW_MAX = env_num("S2E_C2_TRACE_BRANCH_WINDOW_MAX", 0),
+        C2_TRACE_BRANCH_WINDOW_ARM_ON_RECV_RET = env_bool("S2E_C2_TRACE_BRANCH_WINDOW_ARM_ON_RECV_RET", true),
         C2_GUIDE_COMPARE = env_bool("S2E_C2_GUIDE_COMPARE", false),
         C2_COMPARE_BYPASS_PID = env_bool("S2E_C2_COMPARE_BYPASS_PID", false),
         C2_FORCE_FULL_SYMBOLIC_RECV = env_bool("S2E_C2_FORCE_FULL_SYMBOLIC_RECV", false),
         C2_COMPARE_MAX_PREFIX = env_num("S2E_C2_COMPARE_MAX_PREFIX", 32),
-        C2_COMPARE_AFTER_NET_ONLY = env_bool("S2E_C2_COMPARE_AFTER_NET_ONLY", true),
-        C2_COMPARE_AFTER_NET_BUDGET = env_num("S2E_C2_COMPARE_AFTER_NET_BUDGET", 8),
-        C2_COMPARE_ONCE_PER_SITE = env_bool("S2E_C2_COMPARE_ONCE_PER_SITE", true),
         C2_NET_MAX_SYMBOLIC = env_num("S2E_C2_NET_MAX_SYMBOLIC", 1024),
         C2_RECV_FORMAT = env_str("S2E_C2_RECV_FORMAT", ""),
         C2_COMPARE_RETADDR_WHITELIST = env_str("S2E_C2_COMPARE_RETADDR_WHITELIST", ""),
@@ -65,12 +131,16 @@ function M.load(target_profile)
         C2_GATE_MAGIC_PATCHES = env_str("S2E_C2_GATE_MAGIC_PATCHES", ""),
         C2_KILL_ON_TARGET_EXIT = env_bool("S2E_C2_KILL_ON_TARGET_EXIT", true),
         C2_SUPPRESS_TARGET_EXIT = env_bool("S2E_C2_SUPPRESS_TARGET_EXIT", false),
-        C2_FORCE_LASTERROR = env_num("S2E_C2_FORCE_LASTERROR", nil),
         C2_EXTRACT_PAYLOADS = env_bool("S2E_C2_EXTRACT_PAYLOADS", true),
         C2_FORCE_SELECT_READY = env_bool("S2E_C2_FORCE_SELECT_READY", true),
         C2_FORCE_NET_EMULATION = env_bool("S2E_C2_FORCE_NET_EMULATION", false),
         C2_FORCE_NET_PROGRESS = env_bool("S2E_C2_FORCE_NET_PROGRESS", true),
         C2_FORCE_CONNECT_CALL = env_bool("S2E_C2_FORCE_CONNECT_CALL", true),
+        C2_FORCE_GETHOSTBYNAME = env_bool("S2E_C2_FORCE_GETHOSTBYNAME", false),
+        C2_FORCE_GETHOSTBYADDR = env_bool("S2E_C2_FORCE_GETHOSTBYADDR", false),
+        C2_FORCE_DNS_IP = env_str("S2E_C2_FORCE_DNS_IP", "127.0.0.1"),
+        C2_FORCE_CONNECT_REDIRECT_IP = env_str("S2E_C2_FORCE_CONNECT_REDIRECT_IP", ""),
+        C2_FORCE_CONNECT_REDIRECT_PORT = env_num("S2E_C2_FORCE_CONNECT_REDIRECT_PORT", nil),
         C2_FORCE_KEYSTATE = env_bool("S2E_C2_FORCE_KEYSTATE", true),
         C2_KEYSTATE_PERIOD = env_num("S2E_C2_KEYSTATE_PERIOD", 37),
         C2_KEYSTATE_LOG_BURST = env_num("S2E_C2_KEYSTATE_LOG_BURST", 3),
@@ -80,6 +150,20 @@ function M.load(target_profile)
         C2_GETPROC_LOG_EVERY = env_num("S2E_C2_GETPROC_LOG_EVERY", 100),
         C2_FORCE_RECV_N = env_num("S2E_C2_FORCE_RECV_N", 64),
         C2_FORCE_RECV_USE_REQ = env_bool("S2E_C2_FORCE_RECV_USE_REQ", true),
+        C2_FORCE_RECV_PATTERN = string.lower(env_str("S2E_C2_FORCE_RECV_PATTERN", "zero")),
+        C2_FORCE_RECV_EOF_AFTER = env_num("S2E_C2_FORCE_RECV_EOF_AFTER", 0),
+        C2_BRANCH_SYMBOLIC_FILE = env_str("S2E_C2_BRANCH_SYMBOLIC_FILE", ""),
+        C2_BRANCH_SYMBOLIC_BYTES = env_num("S2E_C2_BRANCH_SYMBOLIC_BYTES", 8),
+        C2_BRANCH_SYMBOLIC_MAX_HITS_PER_PC = env_num("S2E_C2_BRANCH_SYMBOLIC_MAX_HITS_PER_PC", 1),
+        C2_BRANCH_SKIP_RECV_ECHO = env_bool("S2E_C2_BRANCH_SKIP_RECV_ECHO", true),
+        C2_SYMBOLIC_SITES_FILE = sites_file,
+        C2_SYMBOLIC_RECV_RETADDRS = recv_sites_csv,
+        C2_SYMBOLIC_WSARECV_RETADDRS = wsarecv_sites_csv,
+        C2_SYMBOLIC_RECVFROM_RETADDRS = recvfrom_sites_csv,
+        C2_SYMBOLIC_INTERNETREADFILE_RETADDRS = internetreadfile_sites_csv,
+        C2_SYMBOLIC_WINHTTPREADDATA_RETADDRS = winhttpreaddata_sites_csv,
+        C2_KILL_NET_LOOP = env_bool("S2E_C2_KILL_NET_LOOP", false),
+        C2_NET_LOOP_THRESHOLD = env_num("S2E_C2_NET_LOOP_THRESHOLD", 32),
         C2_EXTRACT_BASE_DIR = env_str("S2E_C2_EXTRACT_DIR", env_str("S2E_PROJECT_DIR", ".") .. "/extracted"),
         C2_EXTRACT_RUN_ID = env_str("S2E_C2_EXTRACT_RUN_ID", "manual"),
     }
@@ -105,7 +189,7 @@ function M.load_target_profile()
         if kind == "dll" then
             target_module = "rundll32.exe"
         else
-            target_module = "test.exe"
+            target_module = "target.exe"
         end
     end
 
@@ -149,6 +233,12 @@ end
 function M.load_resolver()
     return {
         DLL_ARCH = string.lower(env_str("S2E_C2_DLL_ARCH", "auto")),
+    }
+end
+
+function M.load_bootstrap()
+    return {
+        C2_TRACE_VMWARE_PORT = env_bool("S2E_C2_TRACE_VMWARE_PORT", false),
     }
 end
 
